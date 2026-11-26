@@ -1,6 +1,25 @@
 import { signal, computed } from "@preact/signals";
-import { api, onAgentEvent, onEvent, onHfProgress } from "./api";
-import type { HfProgress, Chat, ChatSummary, EngineStatus, FileChange, McpServer, ModelEntry, Msg, Settings, AgentEvent, Usage } from "./api";
+import { api, onAgentEvent, onEvent, onHfProgress, onLogBatch } from "./api";
+import type { HfProgress, Chat, ChatSummary, EngineStatus, FileChange, LogEntry, McpServer, ModelEntry, Msg, Settings, AgentEvent, Usage } from "./api";
+
+/* ---------- logs ---------- */
+
+const LOG_CAP = 4000;
+export const logs = signal<LogEntry[]>([]);
+/** errors logged while the Logs tab was not open */
+export const unseenErrors = signal(0);
+/** run to show in the Logs panel's run inspector */
+export const inspectRun = signal<string | null>(null);
+
+function addLogs(batch: LogEntry[]) {
+  if (batch.length === 0) return;
+  const last = logs.value.length ? logs.value[logs.value.length - 1].seq : 0;
+  const fresh = batch.filter((e) => e.seq > last);
+  if (fresh.length === 0) return;
+  const next = logs.value.concat(fresh);
+  logs.value = next.length > LOG_CAP ? next.slice(next.length - LOG_CAP) : next;
+  if (rightTab.value !== "logs") unseenErrors.value += fresh.filter((e) => e.level === "error").length;
+}
 
 /* ---------- notifications ---------- */
 
@@ -58,7 +77,7 @@ export const runningTool = signal<{ call_id: string; name: string; since: number
 export const useTools = signal(true);
 export const attachments = signal<string[]>([]);
 export const settingsOpen = signal(false);
-export type Tab = "models" | "hub" | "server" | "files" | "mcp";
+export type Tab = "models" | "hub" | "server" | "files" | "mcp" | "logs";
 export const rightTab = signal<Tab>("models");
 /** active/finished Hugging Face downloads by job id */
 export const downloads = signal<Record<string, HfProgress>>({});
@@ -456,6 +475,12 @@ export async function initState() {
   const results = await Promise.allSettled([refreshModels(), refreshEngine(), refreshChats(), refreshMcp()]);
   for (const r of results) if (r.status === "rejected") toast(errText(r.reason), "error");
   await onAgentEvent(onAgent);
+  await onLogBatch(addLogs);
+  try {
+    addLogs(await api.logsTail(1500));
+  } catch {
+    /* older backend: no logs */
+  }
   await onHfProgress((p) => {
     downloads.value = { ...downloads.value, [p.id]: p };
     if (p.state === "done") void refreshModels();

@@ -1,6 +1,6 @@
 //! The chat/agent loop: stream a completion, run requested tools (with approval), repeat.
 use crate::util::LockExt;
-use crate::{checkpoint, context, engine::Engine, mcp::Mcp, toolparse, tools};
+use crate::{checkpoint, context, engine::Engine, mcp::Mcp, toolparse, tools, trace};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -66,6 +66,8 @@ pub struct Assembler {
     pub prompt_ms: Option<f64>,
     pub cache_n: Option<u64>,
     pub chunks: u64,
+    /// time from sending the request to the first streamed token
+    pub ttft_ms: Option<u64>,
 }
 
 pub enum Delta {
@@ -311,7 +313,9 @@ async fn stream_turn(
                 for d in asm.feed(&v) {
                     if first_token {
                         first_token = false;
-                        ev(app, run_id, "first_token", json!({"ms": started.elapsed().as_millis() as u64}));
+                        let ms = started.elapsed().as_millis() as u64;
+                        asm.ttft_ms = Some(ms);
+                        ev(app, run_id, "first_token", json!({"ms": ms}));
                     }
                     match d {
                         Delta::Content(t) => ev(app, run_id, "delta", json!({"kind":"content","text":t})),
@@ -377,11 +381,12 @@ fn backoff(n: u32) -> Duration {
 
 const MAX_RETRIES: u32 = 3;
 
-async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'static str, String> {
+async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run) -> Result<&'static str, String> {
     let eng = app.state::<Engine>();
     let mcp = app.state::<Arc<Mcp>>();
     let agent = app.state::<Agent>();
     let ep = eng.endpoint().await.ok_or("no model loaded: load one from the Models tab")?;
+    run.set(json!({"model": ep.model, "engine": ep.engine, "ctx": ep.ctx, "local": ep.local}));
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
 
     let ws = if a.workspace.is_empty() { None } else { Some(PathBuf::from(&a.workspace)) };
@@ -404,6 +409,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
         }
     }
     let known: HashSet<String> = tool_defs.iter().filter_map(|d| d["function"]["name"].as_str().map(String::from)).collect();
+    run.set(json!({"tier": format!("{tier:?}").to_lowercase(), "tools": known.len()}));
 
     // Built once: the system prompt and tool list must stay byte-identical across turns so a
     // local server can reuse its KV cache for the whole prefix instead of re-reading it.
@@ -424,6 +430,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
             if !idx.is_empty() {
                 context::apply(&mut msgs, &idx);
                 let ids: Vec<&str> = idx.iter().filter_map(|&i| msgs[i]["tool_call_id"].as_str()).collect();
+                run.event("prune", json!({"removed": ids.len()}));
                 ev(&app, &a.run_id, "pruned", json!({"call_ids":ids}));
                 ev(&app, &a.run_id, "notice", json!({"text":format!("Context nearly full: removed {} old tool outputs from the prompt.", ids.len())}));
                 if let Some(c) = &tctx {
@@ -458,6 +465,8 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
                 Err(EngineErr::Transient(e)) if attempt < MAX_RETRIES && !ctl.is_cancelled() => {
                     let wait = backoff(attempt);
                     attempt += 1;
+                    crate::log::write("warn", "agent", &format!("retry {attempt}/{MAX_RETRIES}: {e}"), Some(&a.run_id), None);
+                    run.event("retry", json!({"attempt":attempt,"reason":e}));
                     ev(&app, &a.run_id, "retry", json!({"attempt":attempt,"max":MAX_RETRIES,"wait_ms":wait.as_millis() as u64,"reason":e}));
                     tokio::select! {
                         _ = tokio::time::sleep(wait) => {},
@@ -512,6 +521,14 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
             }),
         );
 
+        run.event(
+            "turn",
+            json!({
+                "prompt_tokens": prompt_total, "prompt_n": asm.prompt_n, "cache_n": asm.cache_n, "prompt_ms": asm.prompt_ms,
+                "ttft_ms": asm.ttft_ms, "tokens": toks, "tok_s": tok_s, "secs": secs, "finish": asm.finish,
+                "calls": asm.calls.len(), "chars": asm.content.len(), "reasoning_chars": asm.reasoning.len(),
+            }),
+        );
         let mut content = asm.content.clone();
         let mut calls: Vec<(String, String, String)> = asm
             .calls
@@ -531,6 +548,8 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
                     .into_iter()
                     .map(|c| (format!("call_{}", uuid::Uuid::new_v4().simple()), c.name, c.args.to_string()))
                     .collect();
+                run.event("recovered_text_calls", json!({"count": calls.len()}));
+                crate::log::write("info", "agent", "recovered tool call(s) written as text", Some(&a.run_id), None);
                 ev(&app, &a.run_id, "notice", json!({"text":"Recovered a tool call the model wrote as text."}));
             }
         }
@@ -618,6 +637,18 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
             if ctl.is_cancelled() {
                 cancelled = true;
             }
+            let args_short: String = args.to_string().chars().take(400).collect();
+            run.event(
+                "tool",
+                json!({
+                    "name": name, "args": args_short, "ok": ok, "ms": ms, "out_chars": output.len(),
+                    "error": (!ok).then(|| output.chars().take(300).collect::<String>()),
+                    "change": extra.as_ref().map(|c| json!({"path": c["path"], "added": c["added"], "removed": c["removed"]})),
+                }),
+            );
+            if !ok && !cancelled {
+                crate::log::write("warn", "agent", &format!("{name} failed: {}", output.chars().take(200).collect::<String>()), Some(&a.run_id), None);
+            }
             ev(&app, &a.run_id, "tool_result", json!({"call_id":id,"ok":ok,"output":output,"ms":ms,"change":extra}));
             let mut ui = json!({"ok":ok,"ms":ms,"cancelled":cancelled});
             if let Some(x) = extra {
@@ -640,11 +671,24 @@ pub async fn agent_run(app: AppHandle, agent: State<'_, Agent>, args: RunArgs) -
     agent.runs.lk().insert(args.run_id.clone(), ctl.clone());
     let run_id = args.run_id.clone();
     let app2 = app.clone();
+    let run = trace::Run::start(
+        &run_id,
+        json!({"chat_id": args.chat_id, "messages": args.messages.len(), "use_tools": args.use_tools, "workspace": args.workspace}),
+    );
+    crate::log::write("info", "agent", "run started", Some(&run_id), Some(json!({"chat_id": args.chat_id})));
     tauri::async_runtime::spawn(async move {
-        let r = run_loop(app2.clone(), args, ctl).await;
-        match r {
-            Ok(reason) => ev(&app2, &run_id, "done", json!({"reason":reason})),
-            Err(e) => ev(&app2, &run_id, "error", json!({"message":e})),
+        let r = run_loop(app2.clone(), args, ctl, &run).await;
+        match &r {
+            Ok(reason) => {
+                run.finish(reason, None);
+                crate::log::write("info", "agent", &format!("run finished: {reason}"), Some(&run_id), None);
+                ev(&app2, &run_id, "done", json!({"reason":reason}));
+            }
+            Err(e) => {
+                run.finish("error", Some(e));
+                crate::log::write("error", "agent", &format!("run failed: {e}"), Some(&run_id), None);
+                ev(&app2, &run_id, "error", json!({"message":e}));
+            }
         }
         app2.state::<Agent>().runs.lk().remove(&run_id);
     });

@@ -218,6 +218,38 @@ export interface Usage {
   ctx?: number;
 }
 
+export interface LogEntry {
+  seq: number;
+  ts: number;
+  level: "debug" | "info" | "warn" | "error";
+  source: string;
+  msg: string;
+  run_id?: string;
+  data?: unknown;
+}
+
+export interface RunSummary {
+  run_id: string;
+  chat_id: string;
+  started: number;
+  ms: number;
+  reason: string;
+  error?: string | null;
+  model?: string;
+  engine?: string;
+  ctx?: number;
+  tier?: string;
+  turns: number;
+  tool_calls: number;
+  tool_errors: number;
+  prompt_tokens: number;
+  cached_tokens: number;
+  completion_tokens: number;
+  prompt_ms: number;
+}
+
+export type TraceEvent = { kind: string; t: number } & Record<string, unknown>;
+
 export const api = {
   settingsGet: () => invoke<Settings>("settings_get"),
   settingsSet: (settings: Settings) => invoke<void>("settings_set", { settings }),
@@ -248,6 +280,12 @@ export const api = {
   checkpointUndo: (chatId: string, undoId: string) => invoke<string[]>("checkpoint_undo", { chatId, undoId }),
   checkpointDiff: (chatId: string, ids: string[], path: string) => invoke<string>("checkpoint_diff", { chatId, ids, path }),
   checkpointTouched: (chatId: string, ids: string[]) => invoke<Record<string, number>>("checkpoint_touched", { chatId, ids }),
+  logsTail: (limit?: number, after?: number) => invoke<LogEntry[]>("logs_tail", { limit, after }),
+  logsClear: () => invoke<void>("logs_clear"),
+  logsExport: (dest: string) => invoke<number>("logs_export", { dest }),
+  logsOpenDir: () => invoke<void>("logs_open_dir"),
+  traceList: (limit?: number, chatId?: string) => invoke<RunSummary[]>("trace_list", { limit, chatId }),
+  traceGet: (runId: string) => invoke<{ summary: RunSummary; events: TraceEvent[] }>("trace_get", { runId }),
   mcpStatus: () => invoke<McpServer[]>("mcp_status"),
   mcpGetConfig: () => invoke<string>("mcp_get_config"),
   mcpSaveConfig: (text: string) => invoke<void>("mcp_save_config", { text }),
@@ -258,7 +296,8 @@ export const api = {
 };
 
 export const onAgentEvent = (cb: (e: AgentEvent) => void) => listen<AgentEvent>("agent-event", (e) => cb(e.payload));
-export const onHfProgress = (cb: (e: HfProgress) => void) => listen<HfProgress>("hf-progress", (e) => cb(e.payload));
+export const onLogBatch = (cb: (e: LogEntry[]) => void) => listen<LogEntry[]>("log-batch", (e) => cb(e.payload));
+export const onHfProgress =(cb: (e: HfProgress) => void) => listen<HfProgress>("hf-progress", (e) => cb(e.payload));
 export const onEvent = (name: string, cb: () => void) => listen(name, () => cb());
 
 export function fmtBytes(n: number): string {

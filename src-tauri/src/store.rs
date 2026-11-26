@@ -115,7 +115,12 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn save_settings(s: &Settings) -> Result<(), String> {
     let t = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
-    write_atomic(&settings_path(), t.as_bytes()).map_err(|e| format!("could not save settings: {e}"))
+    write_atomic(&settings_path(), t.as_bytes()).map_err(|e| format!("could not save settings: {e}"))?;
+    // keep the log redactor in step with the keys it must hide
+    let mut secrets = vec![s.api_key.clone(), s.hf_token.clone()];
+    secrets.extend(s.providers.iter().map(|p| p.api_key.clone()));
+    crate::log::set_secrets(secrets);
+    Ok(())
 }
 
 /// Merge only the given top-level fields into the stored settings and return the result.

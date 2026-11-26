@@ -136,6 +136,12 @@ impl Engine {
     }
 
     fn set_state(&self, app: &AppHandle, st: &str, err: &str) {
+        match st {
+            "error" => crate::log::error("engine", &format!("engine error: {err}")),
+            "ready" => crate::log::info("engine", "engine ready"),
+            "loading" => crate::log::info("engine", "loading model…"),
+            _ => crate::log::info("engine", &format!("engine {st}")),
+        }
         *self.state.lk() = st.to_string();
         *self.error.lk() = err.to_string();
         let _ = app.emit("engine-changed", ());
@@ -226,11 +232,13 @@ impl Engine {
 }
 
 fn pipe_logs(engine: &Engine, child: &mut Child) {
-    if let Some(o) = child.stdout.take() {
-        let log = engine.log.clone();
+    fn forward<R: tokio::io::AsyncRead + Unpin + Send + 'static>(r: R, log: Arc<Mutex<VecDeque<String>>>) {
         tokio::spawn(async move {
-            let mut l = BufReader::new(o).lines();
+            let mut l = BufReader::new(r).lines();
             while let Ok(Some(line)) = l.next_line().await {
+                if !line.trim().is_empty() {
+                    crate::log::write(crate::log::level_of(&line), "engine", &line, None, None);
+                }
                 let mut g = log.lk();
                 if g.len() >= 400 {
                     g.pop_front();
@@ -239,18 +247,11 @@ fn pipe_logs(engine: &Engine, child: &mut Child) {
             }
         });
     }
+    if let Some(o) = child.stdout.take() {
+        forward(o, engine.log.clone());
+    }
     if let Some(o) = child.stderr.take() {
-        let log = engine.log.clone();
-        tokio::spawn(async move {
-            let mut l = BufReader::new(o).lines();
-            while let Ok(Some(line)) = l.next_line().await {
-                let mut g = log.lk();
-                if g.len() >= 400 {
-                    g.pop_front();
-                }
-                g.push_back(line);
-            }
-        });
+        forward(o, engine.log.clone());
     }
 }
 

@@ -4,6 +4,7 @@ use crate::util::LockExt;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -147,19 +148,37 @@ impl Conn {
     }
 }
 
-fn spawn_stdio(cfg: &Value) -> Result<Conn, String> {
+/// Find `npx`, `uvx`, `node` etc. the way a shell would (PATH + PATHEXT), so the program can be
+/// started directly instead of through `cmd /C`, where config arguments would be re-parsed by
+/// cmd.exe (`&`, `|`, `^` …). Rust escapes arguments for .cmd/.bat targets itself.
+fn resolve_command(command: &str) -> PathBuf {
+    let p = Path::new(command);
+    if p.components().count() > 1 || p.extension().is_some() {
+        return p.to_path_buf();
+    }
+    let exts: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_ascii_lowercase())
+        .collect();
+    for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        for e in &exts {
+            let cand = dir.join(format!("{command}{e}"));
+            if cand.is_file() {
+                return cand;
+            }
+        }
+    }
+    p.to_path_buf()
+}
+
+fn spawn_stdio(name: &str, cfg: &Value) -> Result<Conn, String> {
     let command = cfg["command"].as_str().ok_or("missing 'command'")?;
     let args: Vec<String> = cfg["args"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
-    let mut cmd = if command.to_lowercase().ends_with(".exe") {
-        let mut c = Command::new(command);
-        c.args(&args);
-        c
-    } else {
-        // npx, uvx, *.cmd shims: let cmd.exe resolve them
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(command).args(&args);
-        c
-    };
+    let exe = resolve_command(command);
+    let mut cmd = Command::new(&exe);
+    cmd.args(&args);
     if let Some(env) = cfg["env"].as_object() {
         for (k, v) in env {
             if let Some(v) = v.as_str() {
@@ -170,14 +189,25 @@ fn spawn_stdio(cfg: &Value) -> Result<Conn, String> {
     if let Some(d) = cfg["cwd"].as_str() {
         cmd.current_dir(d);
     }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     {
         cmd.creation_flags(0x0800_0000);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", exe.display()))?;
     let pid = child.id().unwrap_or(0);
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
+    if let Some(err) = child.stderr.take() {
+        let src = format!("mcp:{name}");
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(err).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                if !l.trim().is_empty() {
+                    crate::log::write(crate::log::level_of(&l), &src, &l, None, None);
+                }
+            }
+        });
+    }
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let p2 = pending.clone();
     tokio::spawn(async move {
@@ -305,7 +335,7 @@ impl Mcp {
             let me = self.clone();
             let app = app.clone();
             tokio::spawn(async move {
-                let conn = if c.get("url").is_some() { make_http(&c) } else { spawn_stdio(&c) };
+                let conn = if c.get("url").is_some() { make_http(&c) } else { spawn_stdio(&name, &c) };
                 let result = match conn {
                     Ok(conn) => {
                         let conn = Arc::new(conn);
@@ -319,6 +349,10 @@ impl Mcp {
                 };
                 if me.generation.load(Ordering::SeqCst) != gen {
                     return; // a newer reload superseded this one
+                }
+                match &result {
+                    Ok((_, tools)) => crate::log::info(&format!("mcp:{name}"), &format!("connected, {} tools", tools.len())),
+                    Err(e) => crate::log::error(&format!("mcp:{name}"), &format!("failed to connect: {e}")),
                 }
                 match result {
                     Ok((conn, tools)) => {
@@ -479,7 +513,7 @@ for line in sys.stdin:
         std::fs::write(&path, script).unwrap();
         let py = "python.exe";
         let cfg = json!({"command": py, "args": [path.to_str().unwrap()]});
-        let conn = spawn_stdio(&cfg).unwrap();
+        let conn = spawn_stdio("test", &cfg).unwrap();
         let tools = handshake(&conn).await.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");

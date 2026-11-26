@@ -7,12 +7,14 @@ mod engine;
 mod fsx;
 mod gguf;
 mod hf;
+mod log;
 mod mcp;
 mod models;
 mod store;
 mod textfile;
 mod toolparse;
 mod tools;
+mod trace;
 mod util;
 
 use std::sync::Arc;
@@ -51,6 +53,12 @@ fn main() {
             checkpoint::checkpoint_undo,
             checkpoint::checkpoint_diff,
             checkpoint::checkpoint_touched,
+            log::logs_tail,
+            log::logs_clear,
+            log::logs_export,
+            log::logs_open_dir,
+            trace::trace_list,
+            trace::trace_get,
             mcp::mcp_status,
             mcp::mcp_get_config,
             mcp::mcp_save_config,
@@ -61,6 +69,14 @@ fn main() {
             fsx::open_url,
         ])
         .setup(|app| {
+            log::init(app.handle().clone());
+            log::info("app", &format!("Harness {} started", env!("CARGO_PKG_VERSION")));
+            // panics in background tasks would otherwise vanish in a windowed release build
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                log::error("app", &format!("internal error: {info}"));
+                prev(info);
+            }));
             let handle = app.handle().clone();
             let mcp = app.state::<Arc<mcp::Mcp>>().inner().clone();
             tauri::async_runtime::spawn(async move {

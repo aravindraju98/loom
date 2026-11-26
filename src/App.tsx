@@ -1,7 +1,8 @@
 import { ChatView } from "./ChatView";
 import { FilesPanel, McpPanel, ModelsPanel } from "./Panels";
 import { SettingsModal } from "./SettingsModal";
-import { chat, chats, openChat, removeChat, restoreReq, rightTab, settingsOpen, settings, startNewChat } from "./state";
+import { chat, chats, openChat, removeChat, restoreReq, rightTab, settingsOpen, settings, startNewChat, unseenErrors } from "./state";
+import { LogsPanel } from "./LogsPanel";
 import { RestoreDialog } from "./RestoreDialog";
 import type { Tab } from "./state";
 
@@ -19,6 +20,7 @@ const TABS: { id: Tab; label: string; icon: IconName }[] = [
   { id: "server", label: "Server", icon: "server" },
   { id: "files", label: "Files", icon: "folder" },
   { id: "mcp", label: "MCP", icon: "plug" },
+  { id: "logs", label: "Logs", icon: "activity" },
 ];
 
 async function askDelete(id: string, title: string) {
@@ -108,6 +110,7 @@ export function App() {
             >
               <Icon name={t.icon} size={16} />
               {tab === t.id && <span>{t.label}</span>}
+              {t.id === "logs" && tab !== "logs" && unseenErrors.value > 0 && <i class="tab-badge" aria-label={`${unseenErrors.value} new errors`} />}
             </button>
           ))}
         </div>
@@ -117,6 +120,7 @@ export function App() {
           {tab === "server" && <ServerPanel />}
           {tab === "files" && <FilesPanel />}
           {tab === "mcp" && <McpPanel />}
+          {tab === "logs" && <LogsPanel />}
         </div>
       </aside>
       {settingsOpen.value && <SettingsModal />}
