@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import { api } from "./api";
 import type { Provider, Settings } from "./api";
-import { engine, loadError, loadModel, saveSettings, settings, unloadModel } from "./state";
+import { changedFields, engine, loadError, loadModel, saveSettings, settings, unloadModel } from "./state";
 
 const copy = (t: string) => void navigator.clipboard.writeText(t);
 
@@ -9,9 +9,16 @@ const copy = (t: string) => void navigator.clipboard.writeText(t);
 
 export function ServerPanel() {
   const cur = settings.value;
+  const [orig, setOrig] = useState<Settings | null>(cur ? { ...cur } : null);
   const [s, setS] = useState<Settings | null>(cur ? { ...cur } : null);
   const [saved, setSaved] = useState(false);
-  if (!s || !cur) return <div class="panel-body hint">Loading…</div>;
+  if (!s || !cur || !orig) return <div class="panel-body hint">Loading…</div>;
+  const save = async () => {
+    if (await saveSettings(changedFields(orig, s))) {
+      setOrig({ ...s });
+      setSaved(true);
+    }
+  };
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => {
     setS({ ...s, [k]: v });
     setSaved(false);
@@ -94,7 +101,7 @@ export function ServerPanel() {
       </label>
       <div class="hint">PolyStrata models use their own profile for context and offload; only host, port and API key apply to them.</div>
       <div class="row">
-        <button class="primary" onClick={() => void saveSettings(s).then(() => setSaved(true))}>Save</button>
+        <button class="primary" onClick={() => void save()}>Save</button>
         {saved && <span class="hint">Saved. Applies the next time a model is loaded.</span>}
       </div>
     </div>
@@ -118,8 +125,7 @@ export function RemoteEndpoints() {
   const st = engine.value;
 
   const persist = async (providers: Provider[]) => {
-    const s = settings.value;
-    if (s) await saveSettings({ ...s, providers });
+    await saveSettings({ providers });
   };
   const save = async () => {
     if (!edit) return;

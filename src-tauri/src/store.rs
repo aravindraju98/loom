@@ -1,8 +1,10 @@
 //! JSON persistence under %APPDATA%\harness.
+use crate::util::{write_atomic, LockExt};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
@@ -70,12 +72,10 @@ pub struct Provider {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            model_dirs: vec![
-                r"E:\PolyStrata-data\models".into(),
-                r"E:\home\aravind\.var\app\ai.lmstudio.lm-studio\.lmstudio\models".into(),
-            ],
-            polystrata_dir: r"D:\PolyStrata".into(),
-            llama_server: r"D:\Linger for AMD\amd-test\engine\b11370-vulkan\llama-server.exe".into(),
+            // machine-specific paths are chosen in Settings on first run, not baked in
+            model_dirs: vec![],
+            polystrata_dir: String::new(),
+            llama_server: String::new(),
             workspace: String::new(),
             ctx: 32768,
             max_turns: 25,
@@ -110,9 +110,29 @@ pub fn load_settings() -> Settings {
         .unwrap_or_default()
 }
 
+/// Serialises every settings read-modify-write so two panels saving at once can't clobber each other.
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn save_settings(s: &Settings) -> Result<(), String> {
     let t = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
-    std::fs::write(settings_path(), t).map_err(|e| e.to_string())
+    write_atomic(&settings_path(), t.as_bytes()).map_err(|e| format!("could not save settings: {e}"))
+}
+
+/// Merge only the given top-level fields into the stored settings and return the result.
+pub fn patch_settings(patch: &Value) -> Result<Settings, String> {
+    let Some(p) = patch.as_object() else { return Err("settings patch must be an object".into()) };
+    let _g = SETTINGS_LOCK.lk();
+    let mut cur = serde_json::to_value(load_settings()).map_err(|e| e.to_string())?;
+    let obj = cur.as_object_mut().ok_or("bad settings")?;
+    for (k, v) in p {
+        if !obj.contains_key(k) {
+            return Err(format!("unknown setting '{k}'"));
+        }
+        obj.insert(k.clone(), v.clone());
+    }
+    let merged: Settings = serde_json::from_value(cur).map_err(|e| format!("invalid setting value: {e}"))?;
+    save_settings(&merged)?;
+    Ok(merged)
 }
 
 fn safe_id(id: &str) -> Result<&str, String> {
@@ -128,46 +148,140 @@ pub fn settings_get() -> Settings {
     load_settings()
 }
 
+/// Kept for compatibility; replaces the whole settings object.
 #[tauri::command]
 pub fn settings_set(settings: Settings) -> Result<(), String> {
+    let _g = SETTINGS_LOCK.lk();
     save_settings(&settings)
 }
 
 #[tauri::command]
-pub fn chat_list() -> Vec<Value> {
-    let mut v: Vec<Value> = std::fs::read_dir(chats_dir())
+pub fn settings_patch(patch: Value) -> Result<Settings, String> {
+    patch_settings(&patch)
+}
+
+// ---- chats -------------------------------------------------------------------------------
+// `index.json` holds {id: {title, updated}} so listing chats doesn't parse every chat file.
+
+static CHATS_LOCK: Mutex<()> = Mutex::new(());
+
+fn index_path(dir: &Path) -> PathBuf {
+    dir.join("index.json")
+}
+
+fn summary(j: &Value) -> Option<(String, Value)> {
+    let id = j.get("id")?.as_str()?.to_string();
+    Some((id, json!({"title": j.get("title").cloned().unwrap_or(Value::Null), "updated": j.get("updated").cloned().unwrap_or(json!(0))})))
+}
+
+fn rebuild_index(dir: &Path) -> Map<String, Value> {
+    let mut m = Map::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("json") || p.file_name() == Some("index.json".as_ref()) {
+            continue;
+        }
+        let Ok(t) = std::fs::read_to_string(&p) else { continue };
+        let Ok(j) = serde_json::from_str::<Value>(&t) else { continue };
+        if let Some((id, s)) = summary(&j) {
+            m.insert(id, s);
+        }
+    }
+    let _ = write_atomic(&index_path(dir), Value::Object(m.clone()).to_string().as_bytes());
+    m
+}
+
+fn read_index(dir: &Path) -> Map<String, Value> {
+    match std::fs::read_to_string(index_path(dir)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+        Some(Value::Object(m)) => m,
+        _ => rebuild_index(dir),
+    }
+}
+
+fn write_index(dir: &Path, m: &Map<String, Value>) -> Result<(), String> {
+    write_atomic(&index_path(dir), Value::Object(m.clone()).to_string().as_bytes()).map_err(|e| e.to_string())
+}
+
+pub fn list_chats_in(dir: &Path) -> Vec<Value> {
+    let _g = CHATS_LOCK.lk();
+    let mut v: Vec<Value> = read_index(dir)
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let t = std::fs::read_to_string(e.path()).ok()?;
-            let j: Value = serde_json::from_str(&t).ok()?;
-            Some(serde_json::json!({
-                "id": j.get("id")?,
-                "title": j.get("title").cloned().unwrap_or(Value::Null),
-                "updated": j.get("updated").cloned().unwrap_or(Value::from(0)),
-            }))
-        })
+        .map(|(id, s)| json!({"id": id, "title": s["title"], "updated": s["updated"]}))
         .collect();
     v.sort_by_key(|j| std::cmp::Reverse(j["updated"].as_u64().unwrap_or(0)));
     v
 }
 
+pub fn save_chat_in(dir: &Path, id: &str, chat: &Value) -> Result<(), String> {
+    let id = safe_id(id)?;
+    let text = serde_json::to_string(chat).map_err(|e| e.to_string())?;
+    let _g = CHATS_LOCK.lk();
+    write_atomic(&dir.join(format!("{id}.json")), text.as_bytes()).map_err(|e| format!("could not save chat: {e}"))?;
+    let mut idx = read_index(dir);
+    if let Some((_, s)) = summary(chat) {
+        idx.insert(id.to_string(), s);
+    }
+    write_index(dir, &idx)
+}
+
+pub fn delete_chat_in(dir: &Path, id: &str) -> Result<(), String> {
+    let id = safe_id(id)?;
+    let _g = CHATS_LOCK.lk();
+    let p = dir.join(format!("{id}.json"));
+    if p.exists() {
+        std::fs::remove_file(&p).map_err(|e| format!("could not delete chat: {e}"))?;
+    }
+    let mut idx = read_index(dir);
+    idx.remove(id);
+    write_index(dir, &idx)
+}
+
+#[tauri::command]
+pub fn chat_list() -> Vec<Value> {
+    list_chats_in(&chats_dir())
+}
+
 #[tauri::command]
 pub fn chat_load(id: String) -> Result<Value, String> {
     let p = chats_dir().join(format!("{}.json", safe_id(&id)?));
-    let t = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
-    serde_json::from_str(&t).map_err(|e| e.to_string())
+    let t = std::fs::read_to_string(p).map_err(|e| format!("could not open chat: {e}"))?;
+    serde_json::from_str(&t).map_err(|e| format!("chat file is damaged: {e}"))
 }
 
 #[tauri::command]
 pub fn chat_save(id: String, chat: Value) -> Result<(), String> {
-    let p = chats_dir().join(format!("{}.json", safe_id(&id)?));
-    std::fs::write(p, serde_json::to_string(&chat).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    save_chat_in(&chats_dir(), &id, &chat)
 }
 
 #[tauri::command]
 pub fn chat_delete(id: String) -> Result<(), String> {
-    let p = chats_dir().join(format!("{}.json", safe_id(&id)?));
-    std::fs::remove_file(p).map_err(|e| e.to_string())
+    delete_chat_in(&chats_dir(), &id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("harness_store_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn chat_index_tracks_saves_and_deletes() {
+        let d = tmp("idx");
+        save_chat_in(&d, "a1", &json!({"id":"a1","title":"First","updated":1,"messages":[]})).unwrap();
+        save_chat_in(&d, "b2", &json!({"id":"b2","title":"Second","updated":5,"messages":[]})).unwrap();
+        let l = list_chats_in(&d);
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[0]["id"], "b2"); // newest first
+        delete_chat_in(&d, "b2").unwrap();
+        assert_eq!(list_chats_in(&d).len(), 1);
+        // a missing or corrupt index is rebuilt from the chat files
+        std::fs::write(d.join("index.json"), "{broken").unwrap();
+        assert_eq!(list_chats_in(&d)[0]["title"], "First");
+        assert!(save_chat_in(&d, "../evil", &json!({})).is_err());
+    }
 }

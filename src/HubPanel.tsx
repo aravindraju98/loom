@@ -133,7 +133,7 @@ export function HubPanel() {
         <summary>Hugging Face token (for gated models)</summary>
         <input
           type="password" placeholder="hf_…" value={s?.hf_token ?? ""}
-          onChange={(e) => s && void saveSettings({ ...s, hf_token: (e.target as HTMLInputElement).value.trim() })}
+          onChange={(e) => void saveSettings({ hf_token: (e.target as HTMLInputElement).value.trim() })}
           aria-label="Hugging Face token"
         />
         <div class="hint">Stored in plain text in settings.json. Only sent to huggingface.co.</div>

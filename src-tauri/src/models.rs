@@ -1,4 +1,5 @@
 //! Model library: scan GGUF files, read their headers, and decide which engine runs them.
+use crate::util::LockExt;
 use crate::{gguf, store};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -178,13 +179,13 @@ static CACHE: std::sync::Mutex<Vec<ModelEntry>> = std::sync::Mutex::new(Vec::new
 /// The last scan's result, scanning once if there is none yet. Loading a model uses this so Load starts at once.
 pub fn cached_or_scan(settings: &store::Settings) -> Vec<ModelEntry> {
     {
-        let c = CACHE.lock().unwrap();
+        let c = CACHE.lk();
         if !c.is_empty() {
             return c.clone();
         }
     }
     let v = scan(settings);
-    *CACHE.lock().unwrap() = v.clone();
+    *CACHE.lk() = v.clone();
     v
 }
 
@@ -194,7 +195,7 @@ pub async fn models_scan() -> Result<Vec<ModelEntry>, String> {
     let v = tauri::async_runtime::spawn_blocking(move || scan(&s))
         .await
         .map_err(|e| format!("scan crashed: {e}"))?;
-    *CACHE.lock().unwrap() = v.clone();
+    *CACHE.lk() = v.clone();
     Ok(v)
 }
 

@@ -1,13 +1,16 @@
 import { useState } from "preact/hooks";
 import type { Settings } from "./api";
-import { refreshModels, saveSettings, settings, settingsOpen } from "./state";
+import { changedFields, refreshModels, saveSettings, settings, settingsOpen } from "./state";
 
 export function SettingsModal() {
-  const [s, setS] = useState<Settings>({ ...(settings.value as Settings) });
+  // the values when the dialog opened: only fields edited here are saved
+  const [orig] = useState<Settings>(() => ({ ...(settings.value as Settings) }));
+  const [s, setS] = useState<Settings>(() => ({ ...orig }));
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setS({ ...s, [k]: v });
   const save = async () => {
-    await saveSettings(s);
-    await refreshModels();
+    const patch = changedFields(orig, s);
+    if (!(await saveSettings(patch))) return;
+    if ("model_dirs" in patch) await refreshModels();
     settingsOpen.value = false;
   };
   return (

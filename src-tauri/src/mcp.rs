@@ -1,5 +1,6 @@
 //! MCP client: stdio and streamable-HTTP servers, configured with the usual {"mcpServers": {...}} JSON.
 use crate::store;
+use crate::util::LockExt;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -55,13 +56,13 @@ impl Conn {
         let reply = match &self.t {
             Transport::Stdio { stdin, pending, .. } => {
                 let (tx, rx) = oneshot::channel();
-                pending.lock().unwrap().insert(id, tx);
+                pending.lk().insert(id, tx);
                 let mut line = msg.to_string();
                 line.push('\n');
                 {
                     let mut w = stdin.lock().await;
                     if let Err(e) = w.write_all(line.as_bytes()).await {
-                        pending.lock().unwrap().remove(&id);
+                        pending.lk().remove(&id);
                         return Err(format!("write failed: {e}"));
                     }
                     let _ = w.flush().await;
@@ -70,7 +71,7 @@ impl Conn {
                     Ok(Ok(v)) => v,
                     Ok(Err(_)) => return Err("server closed the connection".into()),
                     Err(_) => {
-                        pending.lock().unwrap().remove(&id);
+                        pending.lk().remove(&id);
                         return Err(format!("{method} timed out"));
                     }
                 }
@@ -111,12 +112,12 @@ impl Conn {
         for (k, v) in headers {
             rb = rb.header(k, v);
         }
-        if let Some(s) = session.lock().unwrap().clone() {
+        if let Some(s) = session.lk().clone() {
             rb = rb.header("Mcp-Session-Id", s);
         }
         let resp = rb.send().await.map_err(|e| e.to_string())?;
         if let Some(s) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
-            *session.lock().unwrap() = Some(s.to_string());
+            *session.lk() = Some(s.to_string());
         }
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
@@ -185,14 +186,14 @@ fn spawn_stdio(cfg: &Value) -> Result<Conn, String> {
             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
             if v.get("method").is_none() {
                 if let Some(id) = v.get("id").and_then(|x| x.as_u64()) {
-                    if let Some(tx) = p2.lock().unwrap().remove(&id) {
+                    if let Some(tx) = p2.lk().remove(&id) {
                         let _ = tx.send(v);
                     }
                 }
             }
         }
         // process ended: fail anything still waiting
-        p2.lock().unwrap().clear();
+        p2.lk().clear();
     });
     Ok(Conn {
         t: Transport::Stdio { stdin: tokio::sync::Mutex::new(stdin), pending, _child: tokio::sync::Mutex::new(child), pid },
@@ -270,7 +271,7 @@ pub fn read_config_text() -> String {
 
 impl Mcp {
     fn set_status(&self, name: &str, f: impl FnOnce(&mut ServerStatus)) {
-        let mut g = self.status.lock().unwrap();
+        let mut g = self.status.lk();
         if let Some(s) = g.iter_mut().find(|s| s.name == name) {
             f(s);
         }
@@ -283,7 +284,7 @@ impl Mcp {
         let cfg: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap_or(json!({}));
         let servers = cfg.get("mcpServers").or_else(|| cfg.get("servers")).and_then(|v| v.as_object()).cloned().unwrap_or_default();
         {
-            let mut st = self.status.lock().unwrap();
+            let mut st = self.status.lk();
             st.clear();
             for (name, c) in &servers {
                 let disabled = c["disabled"].as_bool().unwrap_or(false);
@@ -367,7 +368,7 @@ impl Mcp {
     /// Tool schemas in OpenAI format, namespaced `server__tool`, plus which are read-only.
     pub fn tool_defs(&self) -> Vec<(Value, bool)> {
         let mut out = vec![];
-        for s in self.status.lock().unwrap().iter().filter(|s| s.state == "ready") {
+        for s in self.status.lk().iter().filter(|s| s.state == "ready") {
             for t in &s.tools {
                 let name = format!("{}__{}", sanitize(&s.name), sanitize(&t.name));
                 out.push((
@@ -385,7 +386,7 @@ impl Mcp {
     pub async fn call(&self, namespaced: &str, args: Value) -> Result<String, String> {
         // find the server + original tool name
         let (server, tool) = {
-            let st = self.status.lock().unwrap();
+            let st = self.status.lk();
             let mut found = None;
             for s in st.iter() {
                 for t in &s.tools {
@@ -424,7 +425,7 @@ impl Mcp {
 
 #[tauri::command]
 pub fn mcp_status(mcp: State<'_, Arc<Mcp>>) -> Vec<ServerStatus> {
-    mcp.status.lock().unwrap().clone()
+    mcp.status.lk().clone()
 }
 
 #[tauri::command]
@@ -438,7 +439,7 @@ pub async fn mcp_save_config(app: AppHandle, mcp: State<'_, Arc<Mcp>>, text: Str
     if !v.get("mcpServers").map(|s| s.is_object()).unwrap_or(false) {
         return Err("config needs an \"mcpServers\" object".into());
     }
-    std::fs::write(config_path(), text).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(&config_path(), text.as_bytes()).map_err(|e| format!("could not save MCP config: {e}"))?;
     let m = mcp.inner().clone();
     m.reload(app).await;
     Ok(())

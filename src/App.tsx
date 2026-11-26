@@ -9,6 +9,7 @@ import { Icon } from "./icons";
 import type { IconName } from "./icons";
 import { ModelPicker } from "./ModelPicker";
 import { ServerPanel } from "./ServerPanel";
+import { Toasts } from "./ui/Toasts";
 
 const TABS: { id: Tab; label: string; icon: IconName }[] = [
   { id: "models", label: "Models", icon: "cube" },
@@ -78,6 +79,7 @@ export function App() {
         {tab === "mcp" && <McpPanel />}
       </aside>
       {settingsOpen.value && <SettingsModal />}
+      <Toasts />
     </div>
   );
 }

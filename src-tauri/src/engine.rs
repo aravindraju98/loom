@@ -1,4 +1,5 @@
 //! Starts and stops the one active inference engine: PolyStrata's server or llama.cpp's llama-server.
+use crate::util::LockExt;
 use crate::{models, store};
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -24,6 +25,7 @@ struct Running {
     port: u16,
     started: Instant,
     api_key: String,
+    ctx: u32,
 }
 
 /// A remote OpenAI-compatible endpoint used instead of a local engine.
@@ -41,6 +43,12 @@ pub struct Endpoint {
     pub base: String,
     pub model: String,
     pub key: String,
+    /// a server this app started (llama.cpp / PolyStrata): llama.cpp-only request fields are safe
+    pub local: bool,
+    /// "llama" | "polystrata" | "remote"
+    pub engine: String,
+    /// context window the server was started with (0 = unknown)
+    pub ctx: u32,
 }
 
 /// Accepts `https://host/v1`, `https://host/v1/`, `https://host` and returns `https://host` (we append /v1/...).
@@ -120,7 +128,7 @@ impl HiddenExt for std::process::Command {
 
 impl Engine {
     fn push_log(&self, line: String) {
-        let mut l = self.log.lock().unwrap();
+        let mut l = self.log.lk();
         if l.len() >= 400 {
             l.pop_front();
         }
@@ -128,13 +136,13 @@ impl Engine {
     }
 
     fn set_state(&self, app: &AppHandle, st: &str, err: &str) {
-        *self.state.lock().unwrap() = st.to_string();
-        *self.error.lock().unwrap() = err.to_string();
+        *self.state.lk() = st.to_string();
+        *self.error.lk() = err.to_string();
         let _ = app.emit("engine-changed", ());
     }
 
     pub async fn status(&self) -> EngineStatus {
-        if let Some(r) = self.remote.lock().unwrap().clone() {
+        if let Some(r) = self.remote.lk().clone() {
             return EngineStatus {
                 state: "ready".into(),
                 engine: "openai".into(),
@@ -144,8 +152,8 @@ impl Engine {
                 ..Default::default()
             };
         }
-        let state = self.state.lock().unwrap().clone();
-        let error = self.error.lock().unwrap().clone();
+        let state = self.state.lk().clone();
+        let error = self.error.lk().clone();
         let g = self.running.lock().await;
         match g.as_ref() {
             Some(r) => EngineStatus {
@@ -168,10 +176,10 @@ impl Engine {
 
     /// Port + served model name of the ready engine, for the chat client.
     pub async fn endpoint(&self) -> Option<Endpoint> {
-        if let Some(r) = self.remote.lock().unwrap().clone() {
-            return Some(Endpoint { base: r.base, model: r.model, key: r.key });
+        if let Some(r) = self.remote.lk().clone() {
+            return Some(Endpoint { base: r.base, model: r.model, key: r.key, local: false, engine: "remote".into(), ctx: 0 });
         }
-        if *self.state.lock().unwrap() != "ready" {
+        if *self.state.lk() != "ready" {
             return None;
         }
         let g = self.running.lock().await;
@@ -179,13 +187,20 @@ impl Engine {
         // a different name could trigger its switch-on-request path.
         g.as_ref().map(|r| {
             let served = if r.engine == "polystrata" { "strata".to_string() } else { r.model_name.clone() };
-            Endpoint { base: format!("http://127.0.0.1:{}", r.port), model: served, key: r.api_key.clone() }
+            Endpoint {
+                base: format!("http://127.0.0.1:{}", r.port),
+                model: served,
+                key: r.api_key.clone(),
+                local: true,
+                engine: r.engine.clone(),
+                ctx: r.ctx,
+            }
         })
     }
 
     pub async fn stop(&self, app: Option<&AppHandle>) {
-        *self.remote.lock().unwrap() = None;
-        *self.generation.lock().unwrap() += 1;
+        *self.remote.lk() = None;
+        *self.generation.lk() += 1;
         let mut g = self.running.lock().await;
         if let Some(mut r) = g.take() {
             kill_tree(r.pid);
@@ -193,8 +208,8 @@ impl Engine {
             let _ = tokio::time::timeout(Duration::from_secs(5), r.child.wait()).await;
         }
         drop(g);
-        *self.state.lock().unwrap() = "idle".into();
-        self.error.lock().unwrap().clear();
+        *self.state.lk() = "idle".into();
+        self.error.lk().clear();
         if let Some(a) = app {
             let _ = a.emit("engine-changed", ());
         }
@@ -216,7 +231,7 @@ fn pipe_logs(engine: &Engine, child: &mut Child) {
         tokio::spawn(async move {
             let mut l = BufReader::new(o).lines();
             while let Ok(Some(line)) = l.next_line().await {
-                let mut g = log.lock().unwrap();
+                let mut g = log.lk();
                 if g.len() >= 400 {
                     g.pop_front();
                 }
@@ -229,7 +244,7 @@ fn pipe_logs(engine: &Engine, child: &mut Child) {
         tokio::spawn(async move {
             let mut l = BufReader::new(o).lines();
             while let Ok(Some(line)) = l.next_line().await {
-                let mut g = log.lock().unwrap();
+                let mut g = log.lk();
                 if g.len() >= 400 {
                     g.pop_front();
                 }
@@ -275,7 +290,7 @@ pub fn patched_profile(profile: &str, all: &[models::ModelEntry]) -> Result<Stri
     let dir = store::data_dir().join("profiles");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let out = dir.join(Path::new(profile).file_name().unwrap_or_default());
-    std::fs::write(&out, serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(&out, serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?.as_bytes()).map_err(|e| e.to_string())?;
     Ok(out.to_string_lossy().into_owned())
 }
 
@@ -351,7 +366,7 @@ pub async fn engine_status(eng: State<'_, Engine>) -> Result<EngineStatus, Strin
 
 #[tauri::command]
 pub fn engine_log(eng: State<'_, Engine>, lines: Option<usize>) -> Vec<String> {
-    let l = eng.log.lock().unwrap();
+    let l = eng.log.lk();
     let n = lines.unwrap_or(120).min(l.len());
     l.iter().skip(l.len() - n).cloned().collect()
 }
@@ -381,7 +396,7 @@ pub async fn engine_load(
             return Err("pick a model name for this endpoint first".into());
         }
         eng.stop(None).await;
-        *eng.remote.lock().unwrap() = Some(Remote {
+        *eng.remote.lk() = Some(Remote {
             id: p.id.clone(),
             name: p.name.clone(),
             base: norm_base(&p.base_url),
@@ -405,8 +420,8 @@ pub async fn engine_load(
     let ctx = ctx.unwrap_or(settings.ctx);
 
     eng.stop(None).await;
-    eng.log.lock().unwrap().clear();
-    let my_gen = *eng.generation.lock().unwrap();
+    eng.log.lk().clear();
+    let my_gen = *eng.generation.lk();
 
     let (mut cmd, port, health, display) = if use_engine == "polystrata" {
         let profile = m.profile.clone().ok_or("no PolyStrata launch profile (strata-*.json) matches this model")?;
@@ -459,6 +474,7 @@ pub async fn engine_load(
             port,
             started: Instant::now(),
             api_key: settings.api_key.clone(),
+            ctx,
         });
     }
     eng.set_state(&app, "loading", "");
@@ -469,7 +485,7 @@ pub async fn engine_load(
     let deadline = Instant::now() + Duration::from_secs(900);
     loop {
         tokio::time::sleep(Duration::from_millis(700)).await;
-        if *eng.generation.lock().unwrap() != my_gen {
+        if *eng.generation.lk() != my_gen {
             return Err("load cancelled".into());
         }
         {
@@ -480,7 +496,7 @@ pub async fn engine_load(
                         *g = None;
                         drop(g);
                         let tail: Vec<String> = {
-                            let l = eng.log.lock().unwrap();
+                            let l = eng.log.lk();
                             l.iter().rev().take(6).rev().cloned().collect()
                         };
                         let msg = format!("{use_engine} exited ({status}) while loading. {}", tail.join(" | "));

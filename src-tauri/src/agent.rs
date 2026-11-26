@@ -1,8 +1,9 @@
 //! The chat/agent loop: stream a completion, run requested tools (with approval), repeat.
-use crate::{engine::Engine, mcp::Mcp, tools};
+use crate::util::LockExt;
+use crate::{engine::Engine, mcp::Mcp, toolparse, tools};
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
@@ -24,6 +25,12 @@ pub struct Agent {
 struct RunCtl {
     cancelled: AtomicBool,
     notify: Notify,
+}
+
+impl RunCtl {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -49,7 +56,12 @@ pub struct Assembler {
     pub calls: BTreeMap<usize, (String, String, String)>, // index -> (id, name, args)
     pub finish: Option<String>,
     pub completion_tokens: Option<u64>,
+    pub prompt_tokens: Option<u64>,
     pub server_tok_s: Option<f64>,
+    /// llama.cpp `timings`: prompt tokens evaluated this turn, ms spent on them, tokens reused from the KV cache
+    pub prompt_n: Option<u64>,
+    pub prompt_ms: Option<f64>,
+    pub cache_n: Option<u64>,
     pub chunks: u64,
 }
 
@@ -64,11 +76,27 @@ impl Assembler {
     /// Feed one parsed SSE chunk; returns text deltas to show.
     pub fn feed(&mut self, v: &Value) -> Vec<Delta> {
         let mut out = vec![];
-        if let Some(u) = v.get("usage").and_then(|u| u.get("completion_tokens")).and_then(|x| x.as_u64()) {
-            self.completion_tokens = Some(u);
+        if let Some(u) = v.get("usage") {
+            if let Some(x) = u.get("completion_tokens").and_then(|x| x.as_u64()) {
+                self.completion_tokens = Some(x);
+            }
+            if let Some(x) = u.get("prompt_tokens").and_then(|x| x.as_u64()) {
+                self.prompt_tokens = Some(x);
+            }
         }
-        if let Some(t) = v.get("timings").and_then(|t| t.get("predicted_per_second")).and_then(|x| x.as_f64()) {
-            self.server_tok_s = Some(t);
+        if let Some(t) = v.get("timings") {
+            if let Some(x) = t.get("predicted_per_second").and_then(|x| x.as_f64()) {
+                self.server_tok_s = Some(x);
+            }
+            if let Some(x) = t.get("prompt_n").and_then(|x| x.as_u64()) {
+                self.prompt_n = Some(x);
+            }
+            if let Some(x) = t.get("prompt_ms").and_then(|x| x.as_f64()) {
+                self.prompt_ms = Some(x);
+            }
+            if let Some(x) = t.get("cache_n").and_then(|x| x.as_u64()) {
+                self.cache_n = Some(x);
+            }
         }
         let Some(ch) = v["choices"].get(0) else { return out };
         if let Some(f) = ch["finish_reason"].as_str() {
@@ -130,6 +158,88 @@ fn strip_for_send(m: &Value) -> Value {
     m
 }
 
+pub const CANCELLED_TOOL: &str = "Cancelled by the user before this tool ran.";
+
+/// Make history valid for strict OpenAI-style servers: every assistant `tool_calls` entry must be
+/// followed by one `tool` message per call id, and no `tool` message may lack its call.
+/// Old chats saved after a mid-tool cancel are repaired here instead of failing with a 400.
+pub fn repair_history(msgs: &[Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(msgs.len());
+    let mut i = 0;
+    while i < msgs.len() {
+        let m = &msgs[i];
+        let role = m["role"].as_str().unwrap_or("");
+        if role == "tool" {
+            // orphan: its assistant call was handled (or never existed)
+            i += 1;
+            continue;
+        }
+        out.push(m.clone());
+        i += 1;
+        if role != "assistant" {
+            continue;
+        }
+        let ids: Vec<(String, String)> = m["tool_calls"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|c| (c["id"].as_str().unwrap_or("").to_string(), c["function"]["name"].as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if ids.is_empty() {
+            continue;
+        }
+        let mut answered: HashMap<String, Value> = HashMap::new();
+        while i < msgs.len() && msgs[i]["role"].as_str() == Some("tool") {
+            if let Some(id) = msgs[i]["tool_call_id"].as_str() {
+                answered.entry(id.to_string()).or_insert_with(|| msgs[i].clone());
+            }
+            i += 1;
+        }
+        for (id, name) in ids {
+            match answered.remove(&id) {
+                Some(t) => out.push(t),
+                None => out.push(json!({"role":"tool","tool_call_id":id,"name":name,"content":CANCELLED_TOOL,"ui":{"ok":false,"cancelled":true}})),
+            }
+        }
+    }
+    out
+}
+
+/// What went wrong talking to the engine, classified so the loop can react.
+#[derive(Debug, PartialEq)]
+enum EngineErr {
+    /// worth retrying: connection refused/reset, 429, 502/503/504
+    Transient(String),
+    /// the prompt no longer fits the model's context window
+    ContextOverflow(String),
+    Fatal(String),
+}
+
+fn classify_status(status: u16, body: &str) -> EngineErr {
+    let low = body.to_ascii_lowercase();
+    let short: String = body.chars().take(400).collect();
+    let msg = format!("engine returned {status}: {short}");
+    let overflow = (low.contains("context") && (low.contains("exceed") || low.contains("too long") || low.contains("length")))
+        || low.contains("n_ctx")
+        || low.contains("maximum context")
+        || low.contains("context_length_exceeded");
+    if overflow {
+        EngineErr::ContextOverflow(msg)
+    } else if matches!(status, 429 | 502 | 503 | 504) || (status == 500 && low.contains("loading")) {
+        EngineErr::Transient(msg)
+    } else {
+        EngineErr::Fatal(msg)
+    }
+}
+
+enum Streamed {
+    Done(Assembler),
+    /// the user pressed Stop mid-stream; whatever arrived so far
+    Cancelled(Assembler),
+}
+
 async fn stream_turn(
     client: &reqwest::Client,
     base: &str,
@@ -138,19 +248,32 @@ async fn stream_turn(
     ctl: &RunCtl,
     app: &AppHandle,
     run_id: &str,
-) -> Result<Assembler, String> {
+) -> Result<Streamed, EngineErr> {
     let mut rq = client.post(format!("{base}/v1/chat/completions")).json(body);
     if !key.is_empty() {
         rq = rq.bearer_auth(key);
     }
-    let resp = rq.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let send = tokio::select! {
+        r = rq.send() => Some(r),
+        _ = ctl.notify.notified() => None,
+    };
+    let Some(resp) = send else { return Ok(Streamed::Cancelled(Assembler::default())) };
+    let resp = resp.map_err(|e| {
+        if e.is_connect() || e.is_timeout() {
+            EngineErr::Transient(format!("could not reach the engine: {e}"))
+        } else {
+            EngineErr::Fatal(format!("request failed: {e}"))
+        }
+    })?;
     if !resp.status().is_success() {
-        let st = resp.status();
+        let st = resp.status().as_u16();
         let t = resp.text().await.unwrap_or_default();
-        return Err(format!("engine returned {st}: {}", t.chars().take(400).collect::<String>()));
+        return Err(classify_status(st, &t));
     }
     let mut asm = Assembler::default();
     let mut last_progress = Instant::now() - Duration::from_secs(1);
+    let mut first_token = true;
+    let started = Instant::now();
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = vec![];
     loop {
@@ -158,11 +281,11 @@ async fn stream_turn(
             n = stream.next() => n,
             _ = ctl.notify.notified() => None,
         };
-        if ctl.cancelled.load(Ordering::SeqCst) {
-            return Err("cancelled".into());
+        if ctl.is_cancelled() {
+            return Ok(Streamed::Cancelled(asm));
         }
         let Some(chunk) = next else { break };
-        let chunk = chunk.map_err(|e| format!("stream error: {e}"))?;
+        let chunk = chunk.map_err(|e| EngineErr::Fatal(format!("stream interrupted: {e}")))?;
         buf.extend_from_slice(&chunk);
         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = buf.drain(..=pos).collect();
@@ -171,10 +294,18 @@ async fn stream_turn(
             let Some(data) = line.strip_prefix("data:") else { continue };
             let data = data.trim();
             if data == "[DONE]" {
-                return Ok(asm);
+                return Ok(Streamed::Done(asm));
             }
             if let Ok(v) = serde_json::from_str::<Value>(data) {
+                if let Some(err) = v.get("error") {
+                    let m = err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error").to_string();
+                    return Err(classify_status(500, &m));
+                }
                 for d in asm.feed(&v) {
+                    if first_token {
+                        first_token = false;
+                        ev(app, run_id, "first_token", json!({"ms": started.elapsed().as_millis() as u64}));
+                    }
                     match d {
                         Delta::Content(t) => ev(app, run_id, "delta", json!({"kind":"content","text":t})),
                         Delta::Reasoning(t) => ev(app, run_id, "delta", json!({"kind":"reasoning","text":t})),
@@ -190,7 +321,7 @@ async fn stream_turn(
             }
         }
     }
-    Ok(asm)
+    Ok(Streamed::Done(asm))
 }
 
 async fn await_permission(
@@ -203,22 +334,37 @@ async fn await_permission(
     args: &Value,
 ) -> bool {
     let (tx, rx) = oneshot::channel();
-    agent.perms.lock().unwrap().insert(call_id.to_string(), tx);
+    agent.perms.lk().insert(call_id.to_string(), tx);
     ev(app, run_id, "permission", json!({"call_id":call_id,"name":name,"args":args}));
     let allowed = tokio::select! {
         r = rx => r.unwrap_or(false),
         _ = ctl.notify.notified() => false,
     };
-    agent.perms.lock().unwrap().remove(call_id);
-    allowed && !ctl.cancelled.load(Ordering::SeqCst)
+    agent.perms.lk().remove(call_id);
+    allowed && !ctl.is_cancelled()
 }
+
+/// Same tool + same arguments this many times in one run means the model is stuck.
+const REPEAT_LIMIT: usize = 2;
+
+fn tool_props(defs: &[Value], name: &str) -> Option<Map<String, Value>> {
+    defs.iter()
+        .find(|d| d["function"]["name"].as_str() == Some(name))
+        .and_then(|d| d["function"]["parameters"]["properties"].as_object().cloned())
+}
+
+/// Delay before retry `n` (0-based): 1s, 2s, 4s.
+fn backoff(n: u32) -> Duration {
+    Duration::from_millis(1000 * (1u64 << n.min(4)))
+}
+
+const MAX_RETRIES: u32 = 3;
 
 async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'static str, String> {
     let eng = app.state::<Engine>();
     let mcp = app.state::<Arc<Mcp>>();
     let agent = app.state::<Agent>();
     let ep = eng.endpoint().await.ok_or("no model loaded: load one from the Models tab")?;
-    let (base, model, key) = (ep.base, ep.model, ep.key);
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
 
     let ws = if a.workspace.is_empty() { None } else { Some(PathBuf::from(&a.workspace)) };
@@ -237,22 +383,30 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
             tool_defs.push(d);
         }
     }
+    let known: HashSet<String> = tool_defs.iter().filter_map(|d| d["function"]["name"].as_str().map(String::from)).collect();
 
-    let mut msgs: Vec<Value> = a.messages.clone();
-    for turn in 0..a.max_turns.max(1) {
-        let mut sys = a.system_prompt.clone();
-        if let Some(w) = &ws {
-            sys.push_str(&format!(
-                "\n\nWorkspace folder: {}\nShell: PowerShell on Windows.\nLarge files: create them in several steps (write_file for the first part, then write_file with append=true for each next part, about 150 lines per call). One giant tool call can take many minutes to generate.",
-                w.display()
-            ));
-        }
+    // Built once: the system prompt and tool list must stay byte-identical across turns so a
+    // local server can reuse its KV cache for the whole prefix instead of re-reading it.
+    let mut sys = a.system_prompt.clone();
+    if let Some(w) = &ws {
+        sys.push_str(&format!(
+            "\n\nWorkspace folder: {}\nShell: PowerShell on Windows.\nPrefer edit_file for changes to existing files; rewrite whole files only when creating them. Large new files: write the first part, then write_file with append=true for each next part (about 150 lines per call).",
+            w.display()
+        ));
+    }
+
+    let mut msgs: Vec<Value> = repair_history(&a.messages);
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for _turn in 0..a.max_turns.max(1) {
         let mut send: Vec<Value> = vec![json!({"role":"system","content":sys})];
         send.extend(msgs.iter().map(strip_for_send));
         let mut body = json!({
-            "model": model, "messages": send, "stream": true,
+            "model": ep.model, "messages": send, "stream": true,
             "stream_options": {"include_usage": true}, "temperature": a.temperature,
         });
+        if ep.local {
+            body["cache_prompt"] = json!(true);
+        }
         if !tool_defs.is_empty() {
             body["tools"] = json!(tool_defs);
             body["tool_choice"] = json!("auto");
@@ -264,26 +418,81 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
         }
 
         let started = Instant::now();
-        let asm = stream_turn(&client, &base, &key, &body, &ctl, &app, &a.run_id).await;
-        let asm = match asm {
-            Ok(x) => x,
-            Err(e) if e == "cancelled" => return Ok("cancelled"),
-            Err(e) => return Err(e),
+        let mut attempt = 0;
+        let streamed = loop {
+            match stream_turn(&client, &ep.base, &ep.key, &body, &ctl, &app, &a.run_id).await {
+                Ok(s) => break s,
+                Err(EngineErr::Transient(e)) if attempt < MAX_RETRIES && !ctl.is_cancelled() => {
+                    let wait = backoff(attempt);
+                    attempt += 1;
+                    ev(&app, &a.run_id, "retry", json!({"attempt":attempt,"max":MAX_RETRIES,"wait_ms":wait.as_millis() as u64,"reason":e}));
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {},
+                        _ = ctl.notify.notified() => {},
+                    }
+                    if ctl.is_cancelled() {
+                        return Ok("cancelled");
+                    }
+                }
+                Err(EngineErr::Transient(e)) | Err(EngineErr::Fatal(e)) => return Err(e),
+                Err(EngineErr::ContextOverflow(e)) => {
+                    return Err(format!("context_overflow: the conversation no longer fits the model's context window. Start a new chat or load the model with a larger context. ({e})"))
+                }
+            }
+        };
+        let asm = match streamed {
+            Streamed::Done(asm) => asm,
+            Streamed::Cancelled(asm) => {
+                // keep what the user already saw; drop half-generated tool calls
+                if !asm.content.trim().is_empty() || !asm.reasoning.trim().is_empty() {
+                    let mut am = json!({"role":"assistant","content":asm.content,"ui":{"cancelled":true}});
+                    if !asm.reasoning.is_empty() {
+                        am["reasoning_content"] = json!(asm.reasoning);
+                    }
+                    ev(&app, &a.run_id, "message", json!({"message":am}));
+                }
+                return Ok("cancelled");
+            }
         };
         let secs = started.elapsed().as_secs_f64();
         let toks = asm.completion_tokens.unwrap_or(asm.chunks);
         let tok_s = asm.server_tok_s.unwrap_or(if secs > 0.0 { toks as f64 / secs } else { 0.0 });
-        ev(&app, &a.run_id, "usage", json!({"tokens":toks,"secs":secs,"tok_s":tok_s}));
+        ev(
+            &app,
+            &a.run_id,
+            "usage",
+            json!({
+                "tokens": toks, "secs": secs, "tok_s": tok_s,
+                "prompt_tokens": asm.prompt_tokens.or(asm.prompt_n.zip(asm.cache_n).map(|(p, c)| p + c)),
+                "prompt_n": asm.prompt_n, "prompt_ms": asm.prompt_ms, "cache_n": asm.cache_n,
+                "ctx": ep.ctx,
+            }),
+        );
 
-        let calls: Vec<(String, String, String)> = asm
+        let mut content = asm.content.clone();
+        let mut calls: Vec<(String, String, String)> = asm
             .calls
             .values()
+            .filter(|(_, n, _)| !n.is_empty())
             .map(|(id, n, args)| {
                 let id = if id.is_empty() { format!("call_{}", uuid::Uuid::new_v4().simple()) } else { id.clone() };
                 (id, n.clone(), args.clone())
             })
             .collect();
-        let mut am = json!({"role":"assistant","content":asm.content});
+        // small models often write the call as text instead of using the tool_calls field
+        if calls.is_empty() && !known.is_empty() {
+            let (found, rest) = toolparse::extract_text_calls(&content, &|n| known.contains(n));
+            if !found.is_empty() {
+                content = rest;
+                calls = found
+                    .into_iter()
+                    .map(|c| (format!("call_{}", uuid::Uuid::new_v4().simple()), c.name, c.args.to_string()))
+                    .collect();
+                ev(&app, &a.run_id, "notice", json!({"text":"Recovered a tool call the model wrote as text."}));
+            }
+        }
+
+        let mut am = json!({"role":"assistant","content":content});
         if !asm.reasoning.is_empty() {
             am["reasoning_content"] = json!(asm.reasoning);
         }
@@ -296,28 +505,47 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
         msgs.push(am.clone());
         ev(&app, &a.run_id, "message", json!({"message":am}));
         if calls.is_empty() {
+            if asm.finish.as_deref() == Some("length") {
+                return Ok("length");
+            }
             return Ok("done");
         }
 
+        let mut cancelled = false;
         for (id, name, args_s) in calls {
-            if ctl.cancelled.load(Ordering::SeqCst) {
-                return Ok("cancelled");
+            if cancelled || ctl.is_cancelled() {
+                cancelled = true;
+                let tm = json!({"role":"tool","tool_call_id":id,"name":name,"content":CANCELLED_TOOL,"ui":{"ok":false,"cancelled":true}});
+                msgs.push(tm.clone());
+                ev(&app, &a.run_id, "message", json!({"message":tm}));
+                continue;
             }
-            let args: Value = if args_s.trim().is_empty() { json!({}) } else { serde_json::from_str(&args_s).unwrap_or(Value::Null) };
+            let mut args = toolparse::repair_json(&args_s).unwrap_or(Value::Null);
+            if let (Some(props), true) = (tool_props(&tool_defs, &name), args.is_object()) {
+                toolparse::normalize_args(&mut args, &props);
+            }
             ev(&app, &a.run_id, "tool_start", json!({"call_id":id,"name":name,"args":args}));
-            let (ok, output) = if args.is_null() {
-                (false, format!("Invalid JSON arguments: {args_s}"))
+            let t0 = Instant::now();
+            let key = format!("{name}\u{1}{args}");
+            let n_seen = {
+                let c = seen.entry(key).or_insert(0);
+                *c += 1;
+                *c
+            };
+            let (ok, output) = if !known.contains(&name) {
+                (false, format!("Unknown tool '{name}'. Available tools: {}.", known.iter().cloned().collect::<Vec<_>>().join(", ")))
+            } else if !args.is_object() {
+                (false, format!("Arguments must be a JSON object; could not parse: {}", args_s.chars().take(300).collect::<String>()))
+            } else if n_seen > REPEAT_LIMIT {
+                (false, format!("You already called {name} with these exact arguments {} times; the result will not change. Try a different approach or answer the user.", n_seen - 1))
             } else {
                 let builtin = tools::is_builtin(&name);
                 let risky = if builtin { tools::needs_approval(&name) } else { !mcp_ro.contains(&name) };
-                let pre_ok = !risky
-                    || a.auto_approve
-                    || agent.always.lock().unwrap().contains(&(a.chat_id.clone(), name.clone()));
+                let pre_ok = !risky || a.auto_approve || agent.always.lk().contains(&(a.chat_id.clone(), name.clone()));
                 let allowed = pre_ok || await_permission(&app, &agent, &ctl, &a.run_id, &id, &name, &args).await;
-                if ctl.cancelled.load(Ordering::SeqCst) {
-                    return Ok("cancelled");
-                }
-                if !allowed {
+                if ctl.is_cancelled() {
+                    (false, CANCELLED_TOOL.to_string())
+                } else if !allowed {
                     (false, "The user denied this tool call.".to_string())
                 } else if builtin {
                     match &ws {
@@ -334,12 +562,18 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
                     }
                 }
             };
-            ev(&app, &a.run_id, "tool_result", json!({"call_id":id,"ok":ok,"output":output}));
-            let tm = json!({"role":"tool","tool_call_id":id,"name":name,"content":output,"ui":{"ok":ok}});
+            let ms = t0.elapsed().as_millis() as u64;
+            if ctl.is_cancelled() {
+                cancelled = true;
+            }
+            ev(&app, &a.run_id, "tool_result", json!({"call_id":id,"ok":ok,"output":output,"ms":ms}));
+            let tm = json!({"role":"tool","tool_call_id":id,"name":name,"content":output,"ui":{"ok":ok,"ms":ms,"cancelled":cancelled}});
             msgs.push(tm.clone());
             ev(&app, &a.run_id, "message", json!({"message":tm}));
         }
-        let _ = turn;
+        if cancelled {
+            return Ok("cancelled");
+        }
     }
     Ok("max_turns")
 }
@@ -347,7 +581,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
 #[tauri::command]
 pub async fn agent_run(app: AppHandle, agent: State<'_, Agent>, args: RunArgs) -> Result<(), String> {
     let ctl = Arc::new(RunCtl::default());
-    agent.runs.lock().unwrap().insert(args.run_id.clone(), ctl.clone());
+    agent.runs.lk().insert(args.run_id.clone(), ctl.clone());
     let run_id = args.run_id.clone();
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -356,14 +590,14 @@ pub async fn agent_run(app: AppHandle, agent: State<'_, Agent>, args: RunArgs) -
             Ok(reason) => ev(&app2, &run_id, "done", json!({"reason":reason})),
             Err(e) => ev(&app2, &run_id, "error", json!({"message":e})),
         }
-        app2.state::<Agent>().runs.lock().unwrap().remove(&run_id);
+        app2.state::<Agent>().runs.lk().remove(&run_id);
     });
     Ok(())
 }
 
 #[tauri::command]
 pub fn agent_cancel(agent: State<'_, Agent>, run_id: String) {
-    if let Some(c) = agent.runs.lock().unwrap().get(&run_id) {
+    if let Some(c) = agent.runs.lk().get(&run_id) {
         c.cancelled.store(true, Ordering::SeqCst);
         c.notify.notify_waiters();
         // wake a waiter that registered after notify_waiters
@@ -374,9 +608,9 @@ pub fn agent_cancel(agent: State<'_, Agent>, run_id: String) {
 #[tauri::command]
 pub fn permission_reply(agent: State<'_, Agent>, call_id: String, chat_id: String, tool: String, allow: bool, always: bool) {
     if allow && always {
-        agent.always.lock().unwrap().insert((chat_id, tool));
+        agent.always.lk().insert((chat_id, tool));
     }
-    if let Some(tx) = agent.perms.lock().unwrap().remove(&call_id) {
+    if let Some(tx) = agent.perms.lk().remove(&call_id) {
         let _ = tx.send(allow);
     }
 }
@@ -394,7 +628,8 @@ mod tests {
             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_","arguments":"{\"pa"}}]}}]}),
             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"file","arguments":"th\":\"a.txt\"}"}}]}}]}),
             json!({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","function":{"name":"list_dir","arguments":"{}"}}]}}]}),
-            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":42}}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":42,"prompt_tokens":900},
+                   "timings":{"prompt_n":100,"prompt_ms":250.0,"cache_n":800,"predicted_per_second":30.5}}),
         ];
         let (mut shown, mut progress) = (0, vec![]);
         for c in &chunks {
@@ -414,5 +649,43 @@ mod tests {
         assert_eq!(a.calls[&1].1, "list_dir");
         assert_eq!(a.finish.as_deref(), Some("tool_calls"));
         assert_eq!(a.completion_tokens, Some(42));
+        assert_eq!((a.prompt_tokens, a.prompt_n, a.cache_n), (Some(900), Some(100), Some(800)));
+        assert_eq!(a.server_tok_s, Some(30.5));
+    }
+
+    #[test]
+    fn repair_fills_missing_tool_results_and_drops_orphans() {
+        let h = vec![
+            json!({"role":"user","content":"hi"}),
+            json!({"role":"assistant","content":"","tool_calls":[
+                {"id":"a","type":"function","function":{"name":"read_file","arguments":"{}"}},
+                {"id":"b","type":"function","function":{"name":"list_dir","arguments":"{}"}}]}),
+            json!({"role":"tool","tool_call_id":"a","content":"ok"}),
+            // cancelled before "b" ran; then the user typed again
+            json!({"role":"user","content":"again"}),
+            json!({"role":"tool","tool_call_id":"zzz","content":"orphan"}),
+        ];
+        let r = repair_history(&h);
+        let roles: Vec<&str> = r.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "tool", "user"]);
+        assert_eq!(r[2]["content"], "ok");
+        assert_eq!(r[3]["tool_call_id"], "b");
+        assert_eq!(r[3]["content"], CANCELLED_TOOL);
+        // valid history is unchanged
+        assert_eq!(repair_history(&r[..4]), r[..4].to_vec());
+    }
+
+    #[test]
+    fn classifies_engine_errors() {
+        assert!(matches!(classify_status(503, "Loading model"), EngineErr::Transient(_)));
+        assert!(matches!(classify_status(429, "slow down"), EngineErr::Transient(_)));
+        assert!(matches!(
+            classify_status(400, "the request exceeds the available context size, try increasing it"),
+            EngineErr::ContextOverflow(_)
+        ));
+        assert!(matches!(classify_status(400, "This model's maximum context length is 8192"), EngineErr::ContextOverflow(_)));
+        assert!(matches!(classify_status(401, "bad key"), EngineErr::Fatal(_)));
+        assert_eq!(backoff(0), Duration::from_secs(1));
+        assert_eq!(backoff(2), Duration::from_secs(4));
     }
 }

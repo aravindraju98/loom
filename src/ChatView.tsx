@@ -4,8 +4,27 @@ import { Icon } from "./icons";
 import type { Msg } from "./api";
 import { md } from "./markdown";
 import {
-  answerPermission, attachments, busy, chat, engine, live, pending, runError, send, settings, stop, toolProgress, useTools,
+  answerPermission, attachments, busy, chat, engine, live, pending, runError, runStatus, runningTool, send, settings, stop, toolProgress, useTools,
 } from "./state";
+
+function fmtMs(ms: number): string {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
+}
+
+/** "31.2 tok/s · 412 tokens · prompt 6.1k (92% cached) in 0.4 s" */
+function turnMeta(u: NonNullable<Msg["ui"]>): string {
+  const parts: string[] = [];
+  if (u.tok_s) parts.push(`${u.tok_s.toFixed(1)} tok/s`);
+  if (u.tokens) parts.push(`${u.tokens} tokens`);
+  if (u.prompt_tokens) {
+    const k = u.prompt_tokens >= 1000 ? `${(u.prompt_tokens / 1000).toFixed(1)}k` : String(u.prompt_tokens);
+    let p = `prompt ${k}`;
+    if (u.cache_n != null && u.prompt_tokens > 0) p += ` (${Math.round((u.cache_n / u.prompt_tokens) * 100)}% cached)`;
+    if (u.prompt_ms) p += ` in ${fmtMs(Math.round(u.prompt_ms))}`;
+    parts.push(p);
+  }
+  return parts.join(" · ");
+}
 
 const draft = signal("");
 
@@ -33,8 +52,17 @@ function Reasoning({ text, open }: { text: string; open?: boolean }) {
 function ToolCard({ name, args, result, callId }: { name: string; args: string; result?: Msg; callId: string }) {
   const waiting = pending.value?.call_id === callId;
   const running = busy.value && !result && !waiting;
-  const status = waiting ? "awaiting approval" : running ? "running…" : result ? (result.ui?.ok === false ? "failed" : "done") : "no result";
-  const cls = waiting ? "wait" : running ? "run" : result?.ui?.ok === false ? "bad" : "ok";
+  const cancelled = result?.ui?.cancelled;
+  const status = waiting
+    ? "awaiting approval"
+    : running
+      ? runningTool.value?.call_id === callId ? "running…" : "queued"
+      : !result
+        ? "not run"
+        : cancelled
+          ? "cancelled"
+          : `${result.ui?.ok === false ? "failed" : "done"}${result.ui?.ms != null ? ` · ${fmtMs(result.ui.ms)}` : ""}`;
+  const cls = waiting ? "wait" : running ? "run" : cancelled || !result ? "skip" : result.ui?.ok === false ? "bad" : "ok";
   return (
     <details class={`tool ${cls}`} open={waiting}>
       <summary>
@@ -83,7 +111,8 @@ function MessageView({ m, all }: { m: Msg; all: Msg[] }) {
           result={all.find((x) => x.role === "tool" && x.tool_call_id === tc.id)}
         />
       ))}
-      {m.ui?.tok_s ? <div class="meta">{m.ui.tok_s.toFixed(1)} tok/s · {m.ui.tokens} tokens</div> : null}
+      {m.ui?.cancelled && <div class="meta">Stopped</div>}
+      {m.ui?.tok_s ? <div class="meta">{turnMeta(m.ui)}</div> : null}
     </div>
   );
 }
@@ -198,8 +227,13 @@ export function ChatView() {
             </div>
           </div>
         )}
-        {busy.value && !toolProgress.value && !l.content && !l.reasoning && !pending.value && <div class="msg assistant dim"><span class="typing" aria-label="Working"><i /><i /><i /></span></div>}
-        {runError.value && <div class="error">{runError.value}</div>}
+        {busy.value && !toolProgress.value && !l.content && !l.reasoning && !pending.value && (
+          <div class="msg assistant dim" role="status">
+            <span class="typing" aria-hidden="true"><i /><i /><i /></span>
+            {runStatus.value && <span class="run-status">{runStatus.value}</span>}
+          </div>
+        )}
+        {runError.value && <div class="error" role="alert">{runError.value}</div>}
       </div>
       <Composer />
     </div>

@@ -8,7 +8,9 @@ mod hf;
 mod mcp;
 mod models;
 mod store;
+mod toolparse;
 mod tools;
+mod util;
 
 use std::sync::Arc;
 use tauri::{Manager, RunEvent};
@@ -23,6 +25,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             store::settings_get,
             store::settings_set,
+            store::settings_patch,
             store::chat_list,
             store::chat_load,
             store::chat_save,

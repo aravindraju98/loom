@@ -1,5 +1,6 @@
 //! Hugging Face model search + GGUF download (user-initiated; talks only to huggingface.co).
 use crate::store;
+use crate::util::LockExt;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -183,7 +184,7 @@ pub async fn hf_download(app: AppHandle, hf: State<'_, Hf>, repo: String, files:
     let id = format!("{repo}::{}", files[0].path);
     let cancel = Arc::new(AtomicBool::new(false));
     {
-        let mut j = hf.jobs.lock().unwrap();
+        let mut j = hf.jobs.lk();
         if j.contains_key(&id) {
             return Err("already downloading".into());
         }
@@ -193,7 +194,7 @@ pub async fn hf_download(app: AppHandle, hf: State<'_, Hf>, repo: String, files:
     tauri::async_runtime::spawn(async move {
         let res = run_download(&app2, &job_id, &repo, &files, &rels, &base, &cancel).await;
         let st = app2.state::<Hf>();
-        st.jobs.lock().unwrap().remove(&job_id);
+        st.jobs.lk().remove(&job_id);
         match res {
             Ok(true) => emit(&app2, &job_id, "done", json!({"dir": base.to_string_lossy()})),
             Ok(false) => emit(&app2, &job_id, "cancelled", json!({})),
@@ -280,7 +281,7 @@ async fn run_download(app: &AppHandle, id: &str, repo: &str, files: &[HfPart], r
 
 #[tauri::command]
 pub fn hf_cancel(hf: State<'_, Hf>, id: String) {
-    if let Some(c) = hf.jobs.lock().unwrap().get(&id) {
+    if let Some(c) = hf.jobs.lk().get(&id) {
         c.store(true, Ordering::SeqCst);
     }
 }

@@ -82,7 +82,20 @@ export interface Msg {
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
-  ui?: { ok?: boolean; tok_s?: number; tokens?: number; attachments?: string[] };
+  ui?: {
+    ok?: boolean;
+    tok_s?: number;
+    tokens?: number;
+    attachments?: string[];
+    /** stopped by the user (partial answer, or a tool that never ran) */
+    cancelled?: boolean;
+    /** tool run time */
+    ms?: number;
+    /** prompt size and KV-cache reuse for the turn that produced this message */
+    prompt_tokens?: number;
+    cache_n?: number;
+    prompt_ms?: number;
+  };
 }
 
 export interface Chat {
@@ -143,15 +156,40 @@ export type AgentEvent = { run_id: string } & (
   | { type: "tool_progress"; name: string; chars: number }
   | { type: "tool_start"; call_id: string; name: string; args: unknown }
   | { type: "permission"; call_id: string; name: string; args: unknown }
-  | { type: "tool_result"; call_id: string; ok: boolean; output: string }
-  | { type: "usage"; tokens: number; secs: number; tok_s: number }
-  | { type: "done"; reason: string }
+  | { type: "tool_result"; call_id: string; ok: boolean; output: string; ms?: number }
+  | {
+      type: "usage";
+      tokens: number;
+      secs: number;
+      tok_s: number;
+      prompt_tokens?: number | null;
+      prompt_n?: number | null;
+      prompt_ms?: number | null;
+      cache_n?: number | null;
+      ctx?: number;
+    }
+  | { type: "first_token"; ms: number }
+  | { type: "retry"; attempt: number; max: number; wait_ms: number; reason: string }
+  | { type: "notice"; text: string }
+  | { type: "done"; reason: "done" | "cancelled" | "max_turns" | "length" | string }
   | { type: "error"; message: string }
 );
+
+export interface Usage {
+  tokens: number;
+  tok_s: number;
+  prompt_tokens?: number | null;
+  prompt_n?: number | null;
+  prompt_ms?: number | null;
+  cache_n?: number | null;
+  ctx?: number;
+}
 
 export const api = {
   settingsGet: () => invoke<Settings>("settings_get"),
   settingsSet: (settings: Settings) => invoke<void>("settings_set", { settings }),
+  /** merge only these fields into the saved settings; returns the result */
+  settingsPatch: (patch: Partial<Settings>) => invoke<Settings>("settings_patch", { patch }),
   chatList: () => invoke<ChatSummary[]>("chat_list"),
   chatLoad: (id: string) => invoke<Chat>("chat_load", { id }),
   chatSave: (id: string, chat: Chat) => invoke<void>("chat_save", { id, chat }),

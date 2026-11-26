@@ -26,8 +26,7 @@ export function ModelsPanel() {
   const setOverride = async (id: string, eng: string) => {
     const s = settings.value;
     if (!s) return;
-    await saveSettings({ ...s, engine_overrides: { ...s.engine_overrides, [id]: eng } });
-    await refreshModels();
+    if (await saveSettings({ engine_overrides: { ...s.engine_overrides, [id]: eng } })) await refreshModels();
   };
 
   return (
@@ -132,7 +131,7 @@ export function FilesPanel() {
 
   const choose = async () => {
     const dir = await open({ directory: true, multiple: false, defaultPath: ws || undefined });
-    if (typeof dir === "string" && settings.value) await saveSettings({ ...settings.value, workspace: dir });
+    if (typeof dir === "string") await saveSettings({ workspace: dir });
   };
   const pick = async (e: FsEntry) => {
     try {
