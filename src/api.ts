@@ -174,11 +174,24 @@ export interface ChatSummary {
   updated: number;
 }
 
+export interface OpenFile {
+  path: string;
+  text: string;
+  version: string;
+  size: number;
+  crlf: boolean;
+  bom: boolean;
+  encoding: string;
+  readonly: boolean;
+}
+
 export interface FsEntry {
   name: string;
   path: string;
   is_dir: boolean;
   size: number;
+  /** matched by the workspace .gitignore */
+  ignored?: boolean;
 }
 
 export interface Preview {
@@ -344,6 +357,8 @@ export const api = {
     invoke<{ undo_id: string; restored: string[] }>("checkpoint_restore", { chatId, ids, force }),
   checkpointUndo: (chatId: string, undoId: string) => invoke<string[]>("checkpoint_undo", { chatId, undoId }),
   checkpointDiff: (chatId: string, ids: string[], path: string) => invoke<string>("checkpoint_diff", { chatId, ids, path }),
+  checkpointFileBase: (chatId: string, ids: string[], path: string) => invoke<string | null>("checkpoint_file_base", { chatId, ids, path }),
+  checkpointRevertFile: (chatId: string, ids: string[], path: string) => invoke<void>("checkpoint_revert_file", { chatId, ids, path }),
   checkpointTouched: (chatId: string, ids: string[]) => invoke<Record<string, number>>("checkpoint_touched", { chatId, ids }),
   logsTail: (limit?: number, after?: number) => invoke<LogEntry[]>("logs_tail", { limit, after }),
   logsClear: () => invoke<void>("logs_clear"),
@@ -361,12 +376,19 @@ export const api = {
   mcpReload: () => invoke<void>("mcp_reload"),
   fsList: (path: string) => invoke<FsEntry[]>("fs_list", { path }),
   fsRead: (path: string) => invoke<Preview>("fs_read", { path }),
+  fsOpen: (path: string) => invoke<OpenFile>("fs_open", { path }),
+  fsSave: (path: string, text: string, expectedVersion?: string) => invoke<{ version: string }>("fs_save", { path, text, expectedVersion }),
+  fsCreate: (path: string, isDir: boolean) => invoke<string>("fs_create", { path, isDir }),
+  fsRename: (from: string, to: string) => invoke<string>("fs_rename", { from, to }),
+  fsDelete: (path: string) => invoke<void>("fs_delete", { path }),
+  fsWatch: () => invoke<void>("fs_watch"),
   fsReveal: (path: string) => invoke<void>("fs_reveal", { path }),
 };
 
 export const onAgentEvent = (cb: (e: AgentEvent) => void) => listen<AgentEvent>("agent-event", (e) => cb(e.payload));
 export const onEvalProgress = (cb: (e: EvalProgress) => void) => listen<EvalProgress>("eval-progress", (e) => cb(e.payload));
-export const onLogBatch =(cb: (e: LogEntry[]) => void) => listen<LogEntry[]>("log-batch", (e) => cb(e.payload));
+export const onFsChanged = (cb: (paths: string[]) => void) => listen<string[]>("fs-changed", (e) => cb(e.payload));
+export const onLogBatch = (cb: (e: LogEntry[]) => void) => listen<LogEntry[]>("log-batch", (e) => cb(e.payload));
 export const onHfProgress =(cb: (e: HfProgress) => void) => listen<HfProgress>("hf-progress", (e) => cb(e.payload));
 export const onEvent = (name: string, cb: () => void) => listen(name, () => cb());
 

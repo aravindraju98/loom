@@ -138,7 +138,7 @@ pub fn fs_rename(from: String, to: String) -> Result<String, String> {
 #[tauri::command]
 pub fn fs_delete(path: String) -> Result<(), String> {
     let p = in_workspace(&path)?;
-    let ws = workspace()?.canonicalize().map_err(|e| e.to_string())?;
+    let ws = crate::util::canon(&workspace()?).map_err(|e| e.to_string())?;
     if p == ws {
         return Err("refusing to delete the workspace folder itself".into());
     }
@@ -214,7 +214,7 @@ const HIDDEN: &[&str] = &[".git", "node_modules", "$RECYCLE.BIN", "System Volume
 #[tauri::command]
 pub fn fs_list(path: String) -> Result<Vec<FsEntry>, String> {
     let path = in_workspace(&path)?;
-    let ws = workspace()?.canonicalize().map_err(|e| e.to_string())?;
+    let ws = crate::util::canon(&workspace()?).map_err(|e| e.to_string())?;
     let (gi, _) = ignore::gitignore::Gitignore::new(ws.join(".gitignore"));
     let mut out = vec![];
     for e in std::fs::read_dir(&path).map_err(|e| e.to_string())?.flatten() {

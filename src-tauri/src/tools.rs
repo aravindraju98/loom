@@ -80,7 +80,7 @@ impl ToolCtx {
         self.reads.lk().clear();
     }
     fn rel(&self, p: &Path) -> String {
-        let root = self.ws.canonicalize().unwrap_or_else(|_| self.ws.clone());
+        let root = crate::util::canon(&self.ws).unwrap_or_else(|_| self.ws.clone());
         p.strip_prefix(&root).unwrap_or(p).to_string_lossy().replace('\\', "/")
     }
 }
@@ -174,7 +174,7 @@ fn plan_tool(args: &Value) -> Result<ToolOut, String> {
 
 /// Resolve `p` against the workspace and refuse anything that lands outside it (.., symlinks, other drives).
 pub fn resolve(ws: &Path, p: &str) -> Result<PathBuf, String> {
-    let root = ws.canonicalize().map_err(|e| format!("workspace unavailable: {e}"))?;
+    let root = crate::util::canon(ws).map_err(|e| format!("workspace unavailable: {e}"))?;
     let p = p.trim().trim_matches('"').trim_matches('`');
     let raw = Path::new(p);
     let joined = if raw.is_absolute() { raw.to_path_buf() } else { root.join(raw) };
@@ -201,7 +201,7 @@ pub fn resolve(ws: &Path, p: &str) -> Result<PathBuf, String> {
             break;
         }
     }
-    let mut real = existing.canonicalize().map_err(|e| format!("bad path: {e}"))?;
+    let mut real = crate::util::canon(&existing).map_err(|e| format!("bad path: {e}"))?;
     for t in tail.into_iter().rev() {
         real.push(t);
     }
@@ -780,7 +780,7 @@ pub async fn run(name: &str, args: &Value, ctx: &ToolCtx) -> Result<ToolOut, Str
             let pat = arg_str(args, "pattern")?.to_string();
             let base = resolve(ws, args.get("path").and_then(|v| v.as_str()).unwrap_or("."))?;
             let glob = args.get("glob").and_then(|v| v.as_str()).map(String::from);
-            let ws = ws.canonicalize().map_err(|e| e.to_string())?;
+            let ws = crate::util::canon(ws).map_err(|e| e.to_string())?;
             tokio::task::spawn_blocking(move || {
                 let re = regex::Regex::new(&pat).or_else(|_| regex::Regex::new(&regex::escape(&pat))).map_err(|e| format!("bad regex: {e}"))?;
                 let gm = match glob {

@@ -40,9 +40,31 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// `canonicalize` without Windows' `\\?\` prefix, so paths match what users and other programs
+/// (Explorer, editors) use. UNC paths keep their prefix.
+pub fn canon(p: &Path) -> std::io::Result<std::path::PathBuf> {
+    Ok(plain(p.canonicalize()?))
+}
+
+pub fn plain(p: std::path::PathBuf) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with(r"UNC\") => std::path::PathBuf::from(rest),
+        _ => p,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canon_has_no_verbatim_prefix() {
+        let c = canon(&std::env::temp_dir()).unwrap();
+        assert!(!c.to_string_lossy().starts_with(r"\\?\"), "{}", c.display());
+        assert_eq!(plain(r"\\?\D:\a".into()), std::path::PathBuf::from(r"D:\a"));
+        assert_eq!(plain(r"\\?\UNC\srv\x".into()), std::path::PathBuf::from(r"\\?\UNC\srv\x"));
+    }
 
     #[test]
     fn atomic_write_replaces_and_leaves_no_temp() {

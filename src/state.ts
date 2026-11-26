@@ -18,7 +18,7 @@ function addLogs(batch: LogEntry[]) {
   if (fresh.length === 0) return;
   const next = logs.value.concat(fresh);
   logs.value = next.length > LOG_CAP ? next.slice(next.length - LOG_CAP) : next;
-  if (rightTab.value !== "logs") unseenErrors.value += fresh.filter((e) => e.level === "error").length;
+  if (!(settingsOpen.value && settingsSection.value === "logs")) unseenErrors.value += fresh.filter((e) => e.level === "error").length;
 }
 
 /* ---------- notifications ---------- */
@@ -77,8 +77,14 @@ export const runningTool = signal<{ call_id: string; name: string; since: number
 export const useTools = signal(true);
 export const attachments = signal<string[]>([]);
 export const settingsOpen = signal(false);
-export type Tab = "models" | "hub" | "server" | "files" | "mcp" | "logs";
-export const rightTab = signal<Tab>("models");
+export type SettingsSection = "models" | "download" | "server" | "mcp" | "agent" | "permissions" | "logs";
+/** which page of the Settings view is shown */
+export const settingsSection = signal<SettingsSection>("models");
+
+export function openSettings(section?: SettingsSection) {
+  if (section) settingsSection.value = section;
+  settingsOpen.value = true;
+}
 /** active/finished Hugging Face downloads by job id */
 export const downloads = signal<Record<string, HfProgress>>({});
 
@@ -343,6 +349,29 @@ export function stripAttachments(s: string): string {
   const i = s.lastIndexOf("\n```\n\n");
   return s.startsWith("File: ") && i >= 0 ? s.slice(i + 6) : s;
 }
+
+/** user message indices → checkpoint ids from `index` on (for diffs and reverts of agent changes) */
+export function checkpointIdsFrom(index = 0): string[] {
+  return chat.value.messages
+    .slice(index)
+    .filter((m) => m.role === "user" && m.ui?.checkpoint_id)
+    .map((m) => m.ui!.checkpoint_id!);
+}
+
+/** Files the agent changed in this chat: absolute path → last change kind. */
+export const agentTouched = computed(() => {
+  const ws = (settings.value?.workspace ?? "").replace(/[\\/]+$/, "");
+  const out = new Map<string, FileChange["kind"]>();
+  for (const m of chat.value.messages) {
+    const c = m.role === "tool" ? m.ui?.change : undefined;
+    if (!c || m.ui?.ok === false) continue;
+    for (const rel of c.kind === "move" ? c.path.split(" → ") : [c.path]) {
+      const abs = /^[a-zA-Z]:[\\/]/.test(rel) ? rel : `${ws}\\${rel.replace(/\//g, "\\")}`;
+      out.set(abs.toLowerCase(), c.kind);
+    }
+  }
+  return out;
+});
 
 export function startNewChat() {
   if (busy.value) return;

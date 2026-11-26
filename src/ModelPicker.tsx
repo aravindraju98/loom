@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { fmtBytes } from "./api";
 import { Icon } from "./icons";
-import { engine, loadModel, models, rightTab, settings, unloadModel } from "./state";
+import { engine, loadModel, models, openSettings, settings, unloadModel } from "./state";
 
 const BADGE: Record<string, string> = { polystrata: "PolyStrata", llama: "llama.cpp", openai: "Remote" };
 
@@ -71,8 +71,8 @@ export function ModelPicker() {
           })}
           {models.value.length === 0 && providers.length === 0 && <div class="menu-empty">No models yet. Download one from the Hub tab or add a remote endpoint.</div>}
           <div class="menu-foot">
-            <button onClick={() => { setOpen(false); rightTab.value = "hub"; }}><Icon name="download" size={14} /> Get models</button>
-            <button onClick={() => { setOpen(false); rightTab.value = "models"; }}><Icon name="cube" size={14} /> Manage</button>
+            <button onClick={() => { setOpen(false); openSettings("download"); }}><Icon name="download" size={14} /> Get models</button>
+            <button onClick={() => { setOpen(false); openSettings("models"); }}><Icon name="cube" size={14} /> Manage</button>
             {(e.state === "ready" || e.state === "loading") && <button class="danger" onClick={() => { setOpen(false); void unloadModel(); }}><Icon name="stop" size={14} /> Unload</button>}
           </div>
         </div>
