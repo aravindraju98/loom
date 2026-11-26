@@ -193,14 +193,7 @@ impl Engine {
         // a different name could trigger its switch-on-request path.
         g.as_ref().map(|r| {
             let served = if r.engine == "polystrata" { "strata".to_string() } else { r.model_name.clone() };
-            Endpoint {
-                base: format!("http://127.0.0.1:{}", r.port),
-                model: served,
-                key: r.api_key.clone(),
-                local: true,
-                engine: r.engine.clone(),
-                ctx: r.ctx,
-            }
+            Endpoint { base: format!("http://127.0.0.1:{}", r.port), model: served, key: r.api_key.clone(), local: true, engine: r.engine.clone(), ctx: r.ctx }
         })
     }
 
@@ -296,7 +289,11 @@ pub fn patched_profile(profile: &str, all: &[models::ModelEntry]) -> Result<Stri
 }
 
 pub fn bind_host(s: &store::Settings) -> &'static str {
-    if s.serve_on_network { "0.0.0.0" } else { "127.0.0.1" }
+    if s.serve_on_network {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    }
 }
 
 pub fn llama_args(m: &models::ModelEntry, s: &store::Settings, ctx: u32, port: u16, vision: bool) -> Vec<String> {
@@ -395,13 +392,8 @@ pub async fn engine_load(
             return Err("pick a model name for this endpoint first".into());
         }
         eng.stop(None).await;
-        *eng.remote.lk() = Some(Remote {
-            id: p.id.clone(),
-            name: p.name.clone(),
-            base: norm_base(&p.base_url),
-            model: p.model.trim().to_string(),
-            key: p.api_key.clone(),
-        });
+        *eng.remote.lk() =
+            Some(Remote { id: p.id.clone(), name: p.name.clone(), base: norm_base(&p.base_url), model: p.model.trim().to_string(), key: p.api_key.clone() });
         eng.set_state(&app, "ready", "");
         return Ok(());
     }
@@ -410,15 +402,13 @@ pub async fn engine_load(
         let s = settings.clone();
         tauri::async_runtime::spawn_blocking(move || models::cached_or_scan(&s)).await.map_err(|e| e.to_string())?
     };
-    let m = all
-        .iter()
-        .find(|m| m.id == model_id)
-        .cloned()
-        .ok_or_else(|| format!("model not in the library ({model_id}); press Rescan"))?;
+    let m = all.iter().find(|m| m.id == model_id).cloned().ok_or_else(|| format!("model not in the library ({model_id}); press Rescan"))?;
     let use_engine = engine.unwrap_or_else(|| m.engine.clone());
     let ctx = ctx.unwrap_or(settings.ctx);
     if settings.serve_on_network && settings.api_key.trim().len() < 8 {
-        return Err("Serving on the network needs an API key of at least 8 characters (Server tab). Without one, anyone on your network could use this machine.".into());
+        return Err(
+            "Serving on the network needs an API key of at least 8 characters (Server tab). Without one, anyone on your network could use this machine.".into(),
+        );
     }
 
     eng.stop(None).await;
@@ -437,11 +427,16 @@ pub async fn engine_load(
         // the profile's display name is the id the server serves
         let port = if settings.poly_port == 0 { POLY_PORT } else { settings.poly_port };
         let mut c = Command::new(py);
-        c.current_dir(root.join("terminal"))
-            .env("PYTHONUTF8", "1")
-            .args(["-u"])
-            .arg(&server)
-            .args(["--engine", "strata", "--config", &profile, "--host", bind_host(&settings), "--port", &port.to_string()]);
+        c.current_dir(root.join("terminal")).env("PYTHONUTF8", "1").args(["-u"]).arg(&server).args([
+            "--engine",
+            "strata",
+            "--config",
+            &profile,
+            "--host",
+            bind_host(&settings),
+            "--port",
+            &port.to_string(),
+        ]);
         if !settings.api_key.is_empty() {
             c.env("STRATA_API_KEY", &settings.api_key); // env, not argv, so it isn't visible in the process list
         }
@@ -453,8 +448,7 @@ pub async fn engine_load(
         }
         let port = if settings.llama_port == 0 { LLAMA_PORT } else { settings.llama_port };
         let mut c = Command::new(exe);
-        c.current_dir(exe.parent().unwrap_or(Path::new(".")))
-            .args(llama_args(&m, &settings, ctx, port, vision.unwrap_or(true)));
+        c.current_dir(exe.parent().unwrap_or(Path::new("."))).args(llama_args(&m, &settings, ctx, port, vision.unwrap_or(true)));
         if !settings.api_key.is_empty() {
             c.env("LLAMA_API_KEY", &settings.api_key);
         } else {
@@ -556,9 +550,18 @@ mod tests {
         )
         .unwrap();
         let entry = models::ModelEntry {
-            id: real.to_string_lossy().into(), name: "r".into(), arch: "".into(), quant: "".into(), size_bytes: 1,
-            ctx_train: 0, moe: false, parts: vec![real.to_string_lossy().into()], mmproj: None,
-            engine: "polystrata".into(), auto_engine: "polystrata".into(), profile: None,
+            id: real.to_string_lossy().into(),
+            name: "r".into(),
+            arch: "".into(),
+            quant: "".into(),
+            size_bytes: 1,
+            ctx_train: 0,
+            moe: false,
+            parts: vec![real.to_string_lossy().into()],
+            mmproj: None,
+            engine: "polystrata".into(),
+            auto_engine: "polystrata".into(),
+            profile: None,
         };
         let out = patched_profile(prof.to_str().unwrap(), &[entry]).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out).unwrap()).unwrap();

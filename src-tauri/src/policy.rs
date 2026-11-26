@@ -46,7 +46,8 @@ pub fn denied_by(cmd: &str, deny: &[String]) -> Option<String> {
 
 /// "git status --short" -> "git status"; "npm test" -> "npm test"; "ls" -> "ls"
 pub fn suggest_prefix(cmd: &str) -> String {
-    let words: Vec<&str> = cmd.split_whitespace().take_while(|w| !w.starts_with('-') && !w.contains(['/', '\\', '.', '"', '\'', ';', '|', '&'])).take(2).collect();
+    let words: Vec<&str> =
+        cmd.split_whitespace().take_while(|w| !w.starts_with('-') && !w.contains(['/', '\\', '.', '"', '\'', ';', '|', '&'])).take(2).collect();
     if words.is_empty() {
         cmd.split_whitespace().next().unwrap_or("").to_string()
     } else {

@@ -190,11 +190,7 @@ pub fn repair_history(msgs: &[Value]) -> Vec<Value> {
         }
         let ids: Vec<(String, String)> = m["tool_calls"]
             .as_array()
-            .map(|a| {
-                a.iter()
-                    .map(|c| (c["id"].as_str().unwrap_or("").to_string(), c["function"]["name"].as_str().unwrap_or("").to_string()))
-                    .collect()
-            })
+            .map(|a| a.iter().map(|c| (c["id"].as_str().unwrap_or("").to_string(), c["function"]["name"].as_str().unwrap_or("").to_string())).collect())
             .unwrap_or_default();
         if ids.is_empty() {
             continue;
@@ -336,16 +332,7 @@ async fn stream_turn(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn await_permission(
-    app: &AppHandle,
-    agent: &Agent,
-    ctl: &RunCtl,
-    run_id: &str,
-    call_id: &str,
-    name: &str,
-    args: &Value,
-    preview: Option<Value>,
-) -> bool {
+async fn await_permission(app: &AppHandle, agent: &Agent, ctl: &RunCtl, run_id: &str, call_id: &str, name: &str, args: &Value, preview: Option<Value>) -> bool {
     let (tx, rx) = oneshot::channel();
     agent.perms.lk().insert(call_id.to_string(), tx);
     ev(app, run_id, "permission", json!({"call_id":call_id,"name":name,"args":args,"preview":preview}));
@@ -388,9 +375,7 @@ fn trunc_out(s: String, max: usize) -> String {
 const REPEAT_LIMIT: usize = 2;
 
 fn tool_props(defs: &[Value], name: &str) -> Option<Map<String, Value>> {
-    defs.iter()
-        .find(|d| d["function"]["name"].as_str() == Some(name))
-        .and_then(|d| d["function"]["parameters"]["properties"].as_object().cloned())
+    defs.iter().find(|d| d["function"]["name"].as_str() == Some(name)).and_then(|d| d["function"]["parameters"]["properties"].as_object().cloned())
 }
 
 /// Delay before retry `n` (0-based): 1s, 2s, 4s.
@@ -568,10 +553,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
             let (found, rest) = toolparse::extract_text_calls(&content, &|n| known.contains(n));
             if !found.is_empty() {
                 content = rest;
-                calls = found
-                    .into_iter()
-                    .map(|c| (format!("call_{}", uuid::Uuid::new_v4().simple()), c.name, c.args.to_string()))
-                    .collect();
+                calls = found.into_iter().map(|c| (format!("call_{}", uuid::Uuid::new_v4().simple()), c.name, c.args.to_string())).collect();
                 run.event("recovered_text_calls", json!({"count": calls.len()}));
                 crate::log::write("info", "agent", "recovered tool call(s) written as text", Some(&a.run_id), None);
                 ev(&app, &a.run_id, "notice", json!({"text":"Recovered a tool call the model wrote as text."}));
@@ -583,10 +565,8 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
             am["reasoning_content"] = json!(asm.reasoning);
         }
         if !calls.is_empty() {
-            am["tool_calls"] = json!(calls
-                .iter()
-                .map(|(id, n, args)| json!({"id":id,"type":"function","function":{"name":n,"arguments":args}}))
-                .collect::<Vec<_>>());
+            am["tool_calls"] =
+                json!(calls.iter().map(|(id, n, args)| json!({"id":id,"type":"function","function":{"name":n,"arguments":args}})).collect::<Vec<_>>());
         }
         msgs.push(am.clone());
         ev(&app, &a.run_id, "message", json!({"message":am}));
@@ -641,8 +621,8 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
                 let dangerous = name == "run_shell" && policy::is_dangerous(cmd);
                 let trusted = perms.trusted.contains(&policy::trust_key(&name, &a.workspace));
                 let shell_ok = name == "run_shell" && policy::allowed_by(cmd, &perms.shell_allow);
-                let pre_ok = !risky
-                    || (!dangerous && (a.auto_approve || trusted || shell_ok || agent.always.lk().contains(&(a.chat_id.clone(), name.clone()))));
+                let pre_ok =
+                    !risky || (!dangerous && (a.auto_approve || trusted || shell_ok || agent.always.lk().contains(&(a.chat_id.clone(), name.clone()))));
                 let mut preview = planned.as_ref().and_then(|p| p.as_ref().ok()).cloned();
                 if name == "run_shell" {
                     preview = Some(json!({"kind":"shell","command":cmd,"dangerous":dangerous,"prefix":policy::suggest_prefix(cmd)}));
@@ -707,10 +687,8 @@ pub async fn agent_run(app: AppHandle, agent: State<'_, Agent>, args: RunArgs) -
     agent.runs.lk().insert(args.run_id.clone(), ctl.clone());
     let run_id = args.run_id.clone();
     let app2 = app.clone();
-    let run = trace::Run::start(
-        &run_id,
-        json!({"chat_id": args.chat_id, "messages": args.messages.len(), "use_tools": args.use_tools, "workspace": args.workspace}),
-    );
+    let run =
+        trace::Run::start(&run_id, json!({"chat_id": args.chat_id, "messages": args.messages.len(), "use_tools": args.use_tools, "workspace": args.workspace}));
     crate::log::write("info", "agent", "run started", Some(&run_id), Some(json!({"chat_id": args.chat_id})));
     tauri::async_runtime::spawn(async move {
         let r = run_loop(app2.clone(), args, ctl, &run).await;
@@ -853,10 +831,7 @@ mod tests {
     fn classifies_engine_errors() {
         assert!(matches!(classify_status(503, "Loading model"), EngineErr::Transient(_)));
         assert!(matches!(classify_status(429, "slow down"), EngineErr::Transient(_)));
-        assert!(matches!(
-            classify_status(400, "the request exceeds the available context size, try increasing it"),
-            EngineErr::ContextOverflow(_)
-        ));
+        assert!(matches!(classify_status(400, "the request exceeds the available context size, try increasing it"), EngineErr::ContextOverflow(_)));
         assert!(matches!(classify_status(400, "This model's maximum context length is 8192"), EngineErr::ContextOverflow(_)));
         assert!(matches!(classify_status(401, "bad key"), EngineErr::Fatal(_)));
         assert_eq!(backoff(0), Duration::from_secs(1));

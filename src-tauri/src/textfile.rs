@@ -57,7 +57,9 @@ pub fn decode(bytes: &[u8]) -> TextFile {
         },
         Encoding::Utf16Le | Encoding::Utf16Be => {
             let units: Vec<u16> = body
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| if encoding == Encoding::Utf16Le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
                 .collect();
             (String::from_utf16_lossy(&units), false)
@@ -143,18 +145,13 @@ mod tests {
 
     #[test]
     fn roundtrips_crlf_bom_and_utf16() {
-        for bytes in [
-            b"a\r\nb\r\n".to_vec(),
-            b"\xEF\xBB\xBFx\ny\n".to_vec(),
-            b"no newline at end".to_vec(),
-            {
-                let mut v = vec![0xFF, 0xFE];
-                for u in "h\r\ni".encode_utf16() {
-                    v.extend_from_slice(&u.to_le_bytes());
-                }
-                v
-            },
-        ] {
+        for bytes in [b"a\r\nb\r\n".to_vec(), b"\xEF\xBB\xBFx\ny\n".to_vec(), b"no newline at end".to_vec(), {
+            let mut v = vec![0xFF, 0xFE];
+            for u in "h\r\ni".encode_utf16() {
+                v.extend_from_slice(&u.to_le_bytes());
+            }
+            v
+        }] {
             let f = decode(&bytes);
             assert!(!f.text.contains('\r'));
             assert_eq!(encode(&f.text, &f), bytes);

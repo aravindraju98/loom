@@ -42,10 +42,7 @@ pub fn strata_profiles(polystrata_dir: &str) -> Vec<Profile> {
         }
         let Ok(t) = std::fs::read_to_string(&p) else { continue };
         let Ok(j) = serde_json::from_str::<serde_json::Value>(t.trim_start_matches('\u{feff}')) else { continue };
-        let args: Vec<String> = j["args"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-            .unwrap_or_default();
+        let args: Vec<String> = j["args"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
         // the main model follows --model or --native
         let mut model = None;
         for w in args.windows(2) {
@@ -98,11 +95,8 @@ pub fn scan(settings: &store::Settings) -> Vec<ModelEntry> {
     for d in &settings.model_dirs {
         walk(Path::new(d), 0, &mut files);
     }
-    let mmprojs: Vec<PathBuf> = files
-        .iter()
-        .filter(|p| p.file_name().and_then(|s| s.to_str()).map(|s| s.to_lowercase().contains("mmproj")).unwrap_or(false))
-        .cloned()
-        .collect();
+    let mmprojs: Vec<PathBuf> =
+        files.iter().filter(|p| p.file_name().and_then(|s| s.to_str()).map(|s| s.to_lowercase().contains("mmproj")).unwrap_or(false)).cloned().collect();
     let mut seen: HashSet<(String, u64)> = HashSet::new();
     let mut out = vec![];
     for f in &files {
@@ -130,9 +124,7 @@ pub fn scan(settings: &store::Settings) -> Vec<ModelEntry> {
             continue; // same file reachable from two folders
         }
         let info = gguf::read_info(f).unwrap_or_default();
-        let quant = quant_from_name(&fname)
-            .or_else(|| info.file_type.and_then(gguf::file_type_name).map(String::from))
-            .unwrap_or_else(|| "?".into());
+        let quant = quant_from_name(&fname).or_else(|| info.file_type.and_then(gguf::file_type_name).map(String::from)).unwrap_or_else(|| "?".into());
         let dir = f.parent();
         let mmproj = mmprojs
             .iter()
@@ -140,10 +132,7 @@ pub fn scan(settings: &store::Settings) -> Vec<ModelEntry> {
             .or_else(|| {
                 // a projector for the same family anywhere in the library
                 let stem = fname.split(['-', '_']).next().unwrap_or("").to_lowercase();
-                mmprojs.iter().find(|m| {
-                    !stem.is_empty()
-                        && m.file_name().and_then(|s| s.to_str()).map(|s| s.to_lowercase().contains(&stem)).unwrap_or(false)
-                })
+                mmprojs.iter().find(|m| !stem.is_empty() && m.file_name().and_then(|s| s.to_str()).map(|s| s.to_lowercase().contains(&stem)).unwrap_or(false))
             })
             .map(|m| m.to_string_lossy().into_owned());
         let id = f.to_string_lossy().into_owned();
@@ -170,7 +159,7 @@ pub fn scan(settings: &store::Settings) -> Vec<ModelEntry> {
             profile: profile.map(|p| p.path.to_string_lossy().into_owned()),
         });
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 
@@ -192,9 +181,7 @@ pub fn cached_or_scan(settings: &store::Settings) -> Vec<ModelEntry> {
 #[tauri::command]
 pub async fn models_scan() -> Result<Vec<ModelEntry>, String> {
     let s = store::load_settings();
-    let v = tauri::async_runtime::spawn_blocking(move || scan(&s))
-        .await
-        .map_err(|e| format!("scan crashed: {e}"))?;
+    let v = tauri::async_runtime::spawn_blocking(move || scan(&s)).await.map_err(|e| format!("scan crashed: {e}"))?;
     *CACHE.lk() = v.clone();
     Ok(v)
 }
@@ -222,7 +209,12 @@ mod scan_debug {
         let r = std::panic::catch_unwind(|| super::scan(&crate::store::Settings::default()));
         println!("scan took {:?}", t.elapsed());
         match r {
-            Ok(v) => { println!("{} models", v.len()); for m in v { println!("{} | {} | {}", m.name, m.engine, m.id); } }
+            Ok(v) => {
+                println!("{} models", v.len());
+                for m in v {
+                    println!("{} | {} | {}", m.name, m.engine, m.id);
+                }
+            }
             Err(_) => println!("PANIC in scan"),
         }
     }

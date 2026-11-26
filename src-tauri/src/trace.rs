@@ -47,7 +47,14 @@ pub struct Run {
 
 impl Run {
     pub fn start(id: &str, head: Value) -> Run {
-        Run { id: id.to_string(), head: Mutex::new(head), started: Instant::now(), started_ms: now_ms(), events: Mutex::new(vec![]), totals: Mutex::new(Totals::default()) }
+        Run {
+            id: id.to_string(),
+            head: Mutex::new(head),
+            started: Instant::now(),
+            started_ms: now_ms(),
+            events: Mutex::new(vec![]),
+            totals: Mutex::new(Totals::default()),
+        }
     }
 
     /// Add fields to the run summary (model, engine… once known).

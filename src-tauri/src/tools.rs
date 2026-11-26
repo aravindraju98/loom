@@ -167,7 +167,8 @@ fn plan_tool(args: &Value) -> Result<ToolOut, String> {
     }
     let done = clean.iter().filter(|s| s["status"] == "done").count();
     let next = clean.iter().find(|s| s["status"] != "done").and_then(|s| s["step"].as_str()).unwrap_or("");
-    let text = if next.is_empty() { format!("Plan updated: all {done} steps done.") } else { format!("Plan updated: {done}/{} done. Next: {next}", clean.len()) };
+    let text =
+        if next.is_empty() { format!("Plan updated: all {done} steps done.") } else { format!("Plan updated: {done}/{} done. Next: {next}", clean.len()) };
     Ok(ToolOut { text, ui: Some(json!({"plan": clean})) })
 }
 
@@ -339,10 +340,7 @@ fn find(text: &str, old: &str) -> Result<Found, String> {
     if ol.is_empty() {
         return Err("old_string is empty or only whitespace".into());
     }
-    for (pass, eq) in [
-        (1, &(|a: &str, b: &str| a.trim_end() == b.trim_end()) as &dyn Fn(&str, &str) -> bool),
-        (2, &|a: &str, b: &str| a.trim() == b.trim()),
-    ] {
+    for (pass, eq) in [(1, &(|a: &str, b: &str| a.trim_end() == b.trim_end()) as &dyn Fn(&str, &str) -> bool), (2, &|a: &str, b: &str| a.trim() == b.trim())] {
         let hits: Vec<usize> = (0..tl.len().saturating_sub(ol.len() - 1)).filter(|&i| ol.iter().enumerate().all(|(j, o)| eq(tl[i + j], o))).collect();
         match hits.len() {
             0 => continue,
@@ -430,7 +428,11 @@ fn apply_edit(text: &str, old: &str, new: &str, all: bool) -> Result<(String, &'
         Found::Ranges(r) => {
             let starts = line_starts(text);
             let at: Vec<String> = r.iter().take(5).map(|(b, _)| line_of(&starts, *b).to_string()).collect();
-            Err(format!("old_string matches {} places (lines {}); include more surrounding lines to make it unique, or set replace_all", r.len(), at.join(", ")))
+            Err(format!(
+                "old_string matches {} places (lines {}); include more surrounding lines to make it unique, or set replace_all",
+                r.len(),
+                at.join(", ")
+            ))
         }
         Found::Lines { start, end, reindent: ri } => {
             let starts = line_starts(text);
@@ -749,14 +751,8 @@ pub async fn run(name: &str, args: &Value, ctx: &ToolCtx) -> Result<ToolOut, Str
             if rows.is_empty() {
                 return Ok("(empty directory)".to_string().into());
             }
-            Ok(trunc(
-                rows.into_iter()
-                    .map(|(f, n, s)| if f { format!("{n}  ({s} bytes)") } else { format!("{n}/") })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                max,
-            )
-            .into())
+            Ok(trunc(rows.into_iter().map(|(f, n, s)| if f { format!("{n}  ({s} bytes)") } else { format!("{n}/") }).collect::<Vec<_>>().join("\n"), max)
+                .into())
         }
         "glob" => {
             let pat = arg_str(args, "pattern")?.to_string();
@@ -966,10 +962,17 @@ mod tests {
         assert!(e.contains("matches 2 places (lines 5, 6)"), "{e}");
         // multi-edit is all-or-nothing
         let before = std::fs::read_to_string(ws.join("m.rs")).unwrap();
-        let e = run("edit_file", &json!({"path":"m.rs","edits":[{"old_string":"fn a()","new_string":"fn a2()"},{"old_string":"nope","new_string":"x"}]}), &c).await.unwrap_err();
+        let e = run("edit_file", &json!({"path":"m.rs","edits":[{"old_string":"fn a()","new_string":"fn a2()"},{"old_string":"nope","new_string":"x"}]}), &c)
+            .await
+            .unwrap_err();
         assert!(e.starts_with("edit 2:") && e.contains("No edits were applied"), "{e}");
         assert_eq!(std::fs::read_to_string(ws.join("m.rs")).unwrap(), before);
-        ok("edit_file", json!({"path":"m.rs","edits":[{"old_string":"fn a()","new_string":"fn a2()"},{"old_string":"compute(1, 2)","new_string":"compute(3, 4)"}]}), &c).await;
+        ok(
+            "edit_file",
+            json!({"path":"m.rs","edits":[{"old_string":"fn a()","new_string":"fn a2()"},{"old_string":"compute(1, 2)","new_string":"compute(3, 4)"}]}),
+            &c,
+        )
+        .await;
         let t = std::fs::read_to_string(ws.join("m.rs")).unwrap();
         assert!(t.contains("fn a2()") && t.contains("compute(3, 4)"));
     }
@@ -1015,7 +1018,13 @@ mod tests {
     async fn plan_tool_normalises_statuses() {
         let ws = tmp("plan");
         let c = ctx(&ws);
-        let o = run("update_plan", &json!({"steps":[{"step":"read","status":"completed"},{"step":"fix","status":"in progress"},{"step":"test","status":"todo"}]}), &c).await.unwrap();
+        let o = run(
+            "update_plan",
+            &json!({"steps":[{"step":"read","status":"completed"},{"step":"fix","status":"in progress"},{"step":"test","status":"todo"}]}),
+            &c,
+        )
+        .await
+        .unwrap();
         assert_eq!(o.text, "Plan updated: 1/3 done. Next: fix");
         assert_eq!(o.ui.unwrap()["plan"][1]["status"], "in_progress");
         assert!(run("update_plan", &json!({"steps":[]}), &c).await.is_err());

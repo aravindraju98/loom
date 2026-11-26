@@ -40,6 +40,7 @@ pub struct ServerStatus {
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
+#[allow(clippy::large_enum_variant)] // one per configured server; size doesn't matter
 enum Transport {
     Stdio { stdin: tokio::sync::Mutex<ChildStdin>, pending: Pending, _child: tokio::sync::Mutex<Child>, pid: u32 },
     Http { url: String, headers: HashMap<String, String>, session: Mutex<Option<String>>, client: reqwest::Client },
@@ -124,12 +125,7 @@ impl Conn {
             return Err(format!("HTTP {}", resp.status()));
         }
         let Some(id) = want_id else { return Ok(None) };
-        let is_sse = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.contains("event-stream"))
-            .unwrap_or(false);
+        let is_sse = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).map(|s| s.contains("event-stream")).unwrap_or(false);
         let body = resp.text().await.map_err(|e| e.to_string())?;
         if is_sse {
             for line in body.lines() {
@@ -225,10 +221,7 @@ fn spawn_stdio(name: &str, cfg: &Value) -> Result<Conn, String> {
         // process ended: fail anything still waiting
         p2.lk().clear();
     });
-    Ok(Conn {
-        t: Transport::Stdio { stdin: tokio::sync::Mutex::new(stdin), pending, _child: tokio::sync::Mutex::new(child), pid },
-        next: AtomicU64::new(1),
-    })
+    Ok(Conn { t: Transport::Stdio { stdin: tokio::sync::Mutex::new(stdin), pending, _child: tokio::sync::Mutex::new(child), pid }, next: AtomicU64::new(1) })
 }
 
 fn make_http(cfg: &Value) -> Result<Conn, String> {
@@ -241,18 +234,11 @@ fn make_http(cfg: &Value) -> Result<Conn, String> {
             }
         }
     }
-    Ok(Conn {
-        t: Transport::Http { url, headers, session: Mutex::new(None), client: reqwest::Client::new() },
-        next: AtomicU64::new(1),
-    })
+    Ok(Conn { t: Transport::Http { url, headers, session: Mutex::new(None), client: reqwest::Client::new() }, next: AtomicU64::new(1) })
 }
 
 async fn handshake(conn: &Conn) -> Result<Vec<ToolInfo>, String> {
-    conn.request(
-        "initialize",
-        json!({"protocolVersion":PROTOCOL,"capabilities":{},"clientInfo":{"name":"harness","version":"0.1.0"}}),
-    )
-    .await?;
+    conn.request("initialize", json!({"protocolVersion":PROTOCOL,"capabilities":{},"clientInfo":{"name":"harness","version":"0.1.0"}})).await?;
     conn.notify("notifications/initialized", json!({})).await;
     let mut tools = vec![];
     let mut cursor: Option<String> = None;
@@ -376,11 +362,8 @@ impl Mcp {
         let mut g = self.conns.lock().await;
         for (_, c) in g.drain() {
             if let Transport::Stdio { pid, .. } = &c.t {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                let _ =
+                    std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
             }
         }
     }

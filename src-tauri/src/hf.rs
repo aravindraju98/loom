@@ -18,16 +18,16 @@ pub struct Hf {
 }
 
 fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .user_agent("harness-app")
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())
+    reqwest::Client::builder().user_agent("harness-app").connect_timeout(Duration::from_secs(15)).build().map_err(|e| e.to_string())
 }
 
 fn auth(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     let t = store::load_settings().hf_token;
-    if t.trim().is_empty() { rb } else { rb.bearer_auth(t.trim()) }
+    if t.trim().is_empty() {
+        rb
+    } else {
+        rb.bearer_auth(t.trim())
+    }
 }
 
 /// `owner/name` using only characters Hugging Face allows.
@@ -151,7 +151,7 @@ pub async fn hf_files(repo: String) -> Result<Vec<HfGroup>, String> {
     for g in out.iter_mut() {
         g.files.sort_by(|a, b| a.path.cmp(&b.path));
     }
-    out.sort_by(|a, b| (a.kind.clone(), a.total).cmp(&(b.kind.clone(), b.total)));
+    out.sort_by_key(|a| (a.kind.clone(), a.total));
     Ok(out)
 }
 

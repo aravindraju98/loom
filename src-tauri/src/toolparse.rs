@@ -129,12 +129,7 @@ pub struct TextCall {
 
 fn call_from_obj(v: &Value, known: &dyn Fn(&str) -> bool) -> Option<TextCall> {
     let o = v.as_object()?;
-    let name = o
-        .get("name")
-        .or_else(|| o.get("function").and_then(|f| f.get("name")))
-        .or_else(|| o.get("tool"))
-        .and_then(|n| n.as_str())?
-        .to_string();
+    let name = o.get("name").or_else(|| o.get("function").and_then(|f| f.get("name"))).or_else(|| o.get("tool")).and_then(|n| n.as_str())?.to_string();
     if !known(&name) {
         return None;
     }

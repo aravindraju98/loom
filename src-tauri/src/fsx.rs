@@ -59,12 +59,7 @@ pub fn fs_read(path: String) -> Result<Preview, String> {
     let mut buf = vec![0u8; 200_000.min(size as usize)];
     f.read_exact(&mut buf).map_err(|e| e.to_string())?;
     let binary = crate::textfile::looks_binary(&buf);
-    Ok(Preview {
-        text: if binary { String::new() } else { crate::textfile::decode(&buf).text },
-        truncated: size as usize > buf.len(),
-        binary,
-        size,
-    })
+    Ok(Preview { text: if binary { String::new() } else { crate::textfile::decode(&buf).text }, truncated: size as usize > buf.len(), binary, size })
 }
 
 /// Open an http(s) link from rendered markdown in the default browser.

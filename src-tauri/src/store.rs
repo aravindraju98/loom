@@ -118,10 +118,7 @@ fn settings_path() -> PathBuf {
 }
 
 fn load_settings_file() -> Settings {
-    std::fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(s.trim_start_matches('\u{feff}')).ok())
-        .unwrap_or_default()
+    std::fs::read_to_string(settings_path()).ok().and_then(|s| serde_json::from_str(s.trim_start_matches('\u{feff}')).ok()).unwrap_or_default()
 }
 
 pub fn load_settings() -> Settings {
@@ -283,10 +280,7 @@ fn write_index(dir: &Path, m: &Map<String, Value>) -> Result<(), String> {
 
 pub fn list_chats_in(dir: &Path) -> Vec<Value> {
     let _g = CHATS_LOCK.lk();
-    let mut v: Vec<Value> = read_index(dir)
-        .into_iter()
-        .map(|(id, s)| json!({"id": id, "title": s["title"], "updated": s["updated"]}))
-        .collect();
+    let mut v: Vec<Value> = read_index(dir).into_iter().map(|(id, s)| json!({"id": id, "title": s["title"], "updated": s["updated"]})).collect();
     v.sort_by_key(|j| std::cmp::Reverse(j["updated"].as_u64().unwrap_or(0)));
     v
 }

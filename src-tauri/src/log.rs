@@ -76,9 +76,7 @@ pub fn date_of(ms: u128) -> String {
 /// Mask secrets: configured keys verbatim, plus anything that looks like a bearer token or key=value.
 pub fn redact(s: &str, secrets: &[String]) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r#"(?i)(bearer\s+|api[_-]?key["'\s:=]+|token["'\s:=]+|authorization["'\s:=]+)([A-Za-z0-9._\-]{8,})"#).unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r#"(?i)(bearer\s+|api[_-]?key["'\s:=]+|token["'\s:=]+|authorization["'\s:=]+)([A-Za-z0-9._\-]{8,})"#).unwrap());
     let mut out = s.to_string();
     for k in secrets {
         if k.len() >= 6 {
@@ -144,10 +142,8 @@ pub fn write(level: &'static str, source: &str, msg: &str, run_id: Option<&str>,
         st.ring.pop_front();
     }
     st.ring.push_back(e.clone());
-    if APP.get().is_some() {
-        if st.pending.len() < 2000 {
-            st.pending.push(e);
-        }
+    if APP.get().is_some() && st.pending.len() < 2000 {
+        st.pending.push(e);
     }
 }
 
