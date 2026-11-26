@@ -46,6 +46,7 @@ fn main() {
             engine::engine_unload,
             engine::provider_models,
             hf::hf_search,
+            hf::hf_browse,
             hf::hf_files,
             hf::hf_download,
             hf::hf_cancel,

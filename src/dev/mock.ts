@@ -184,6 +184,13 @@ export function installMock() {
         case "trace_list": return [run.summary, { ...run.summary, run_id: "r0", started: now - 7.2e6, ms: 4200, turns: 1, tool_calls: 0, reason: "error", error: "context_overflow: the conversation no longer fits", prompt_tokens: 0, cached_tokens: 0 }];
         case "trace_get": return run;
         case "eval_list": return evalScenarios;
+        case "hf_browse": return [
+          { id: "unsloth/Qwen3.6-35B-A3B-GGUF", downloads: 2_480_000, likes: 1450, pipeline: "image-text-to-text", updated: new Date(now - 3 * 8.64e7).toISOString() },
+          { id: "bartowski/gemma-4-26B-A4B-it-GGUF", downloads: 912_000, likes: 610, pipeline: "image-text-to-text", updated: new Date(now - 9 * 8.64e7).toISOString() },
+          { id: "unsloth/Qwen3.8-27B-GGUF", downloads: 8_180_000, likes: 7128, updated: new Date(now - 20 * 8.64e7).toISOString() },
+          { id: "ggml-org/gpt-oss-20b-GGUF", downloads: 640_000, likes: 402, pipeline: "text-generation", updated: new Date(now - 70 * 8.64e7).toISOString() },
+          { id: "lmstudio-community/Mistral-Small-4-24B-Instruct-GGUF", downloads: 210_000, likes: 188, pipeline: "text-generation", updated: new Date(now - 40 * 8.64e7).toISOString() },
+        ];
         case "eval_results": return [evalBatch("qwen2.5-coder-7b-instruct-q4_k_m", now - 3.6e6, [true, true, false, true, true, true]), evalBatch("gemma-3-12b-it-Q5_K_M", now - 8.64e7, [true, false, false, true, true, true])];
         case "fs_list": return [
           { name: "src", path: `${WS}\\src`, is_dir: true, size: 0 },

@@ -129,7 +129,8 @@ pub fn write(level: &'static str, source: &str, msg: &str, run_id: Option<&str>,
     let e = Entry { seq: st.seq, ts: now_ms(), level, source: source.to_string(), msg, run_id: run_id.map(String::from), data };
     // file (opened lazily, one per day)
     let day = date_of(e.ts);
-    if st.file.as_ref().map(|(d, _)| d != &day).unwrap_or(true) {
+    // unit tests must not write into the user's real log folder
+    if !cfg!(test) && st.file.as_ref().map(|(d, _)| d != &day).unwrap_or(true) {
         let _ = std::fs::create_dir_all(logs_dir());
         st.file = std::fs::OpenOptions::new().create(true).append(true).open(logs_dir().join(format!("harness-{day}.jsonl"))).ok().map(|f| (day, f));
     }

@@ -1,8 +1,70 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
+import { signal } from "@preact/signals";
 import { api, fmtBytes } from "./api";
-import type { HfGroup, HfModel } from "./api";
+import type { HfGroup, HfList, HfModel } from "./api";
 import { Icon } from "./icons";
 import { downloads, saveSettings, settings } from "./state";
+
+/** "3d ago", "2mo ago" */
+function ago(iso?: string): string {
+  if (!iso) return "";
+  const d = (Date.now() - Date.parse(iso)) / 86_400_000;
+  if (!Number.isFinite(d)) return "";
+  if (d < 1) return "today";
+  if (d < 30) return `${Math.floor(d)}d ago`;
+  if (d < 365) return `${Math.floor(d / 30)}mo ago`;
+  return `${Math.floor(d / 365)}y ago`;
+}
+
+const LISTS: { id: HfList; label: string; hint: string }[] = [
+  { id: "recommended", label: "Recommended", hint: "Trending chat models from well-known GGUF publishers (unsloth, bartowski, lmstudio-community, ggml-org…)" },
+  { id: "trending", label: "Trending", hint: "What's popular on Hugging Face right now" },
+  { id: "downloads", label: "Most downloaded", hint: "All-time downloads" },
+  { id: "likes", label: "Most liked", hint: "All-time likes" },
+];
+
+/** fetched lists, kept while the app is open (switching tabs doesn't refetch) */
+const browseCache = signal<Partial<Record<HfList, HfModel[]>>>({});
+const browseList = signal<HfList>("recommended");
+
+function Browse({ dest }: { dest: string }) {
+  const list = browseList.value;
+  const items = browseCache.value[list];
+  const [err, setErr] = useState("");
+  const load = (force = false) => {
+    if (!force && browseCache.value[list]) return;
+    setErr("");
+    api
+      .hfBrowse(list)
+      .then((r) => (browseCache.value = { ...browseCache.value, [list]: r }))
+      .catch((e) => setErr(String(e)));
+  };
+  useEffect(() => load(), [list]);
+  return (
+    <>
+      <div class="segmented hub-lists" role="tablist" aria-label="Model lists">
+        {LISTS.map((l) => (
+          <button key={l.id} role="tab" aria-selected={list === l.id} class={list === l.id ? "on" : ""} title={l.hint} onClick={() => (browseList.value = l.id)}>
+            {l.label}
+          </button>
+        ))}
+      </div>
+      {err && (
+        <div class="error small">
+          {err} <button class="chip-btn" onClick={() => load(true)}>Retry</button>
+        </div>
+      )}
+      {!items && !err && (
+        <div class="skeleton-list" aria-label="Loading">
+          {Array.from({ length: 6 }, (_, i) => <div key={i} class="skeleton" />)}
+        </div>
+      )}
+      {items?.length === 0 && <div class="hint">Nothing here right now.</div>}
+      {items?.map((m) => <Repo key={m.id} m={m} dest={dest} />)}
+      {items && items.length > 0 && <div class="hint small">From huggingface.co · GGUF chat models only</div>}
+    </>
+  );
+}
 
 const fmtN = (n: number) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n));
 
@@ -70,7 +132,13 @@ function Repo({ m, dest }: { m: HfModel; dest: string }) {
       <button class="hf-head" aria-expanded={open} onClick={() => void toggle()}>
         <span class="grow">
           <span class="menu-name ellipsis">{m.id}</span>
-          {m.downloads > 0 && <span class="menu-sub">↓ {fmtN(m.downloads)} · ♥ {fmtN(m.likes)}</span>}
+          {m.downloads > 0 && (
+            <span class="menu-sub">
+              ↓ {fmtN(m.downloads)} · ♥ {fmtN(m.likes)}
+              {m.pipeline === "image-text-to-text" ? " · vision" : ""}
+              {m.updated ? ` · ${ago(m.updated)}` : ""}
+            </span>
+          )}
         </span>
         <span style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 160ms", display: "inline-flex" }}><Icon name="chevron" size={14} /></span>
       </button>
@@ -114,7 +182,15 @@ export function HubPanel() {
     <div class="panel-body">
       <form class="searchbar" onSubmit={(e) => { e.preventDefault(); void search(); }}>
         <Icon name="search" size={15} />
-        <input placeholder="Search GGUF models, or paste owner/name or a link" value={q} onInput={(e) => setQ((e.target as HTMLInputElement).value)} aria-label="Search Hugging Face" />
+        <input placeholder="Search GGUF models, or paste owner/name or a link" value={q} onInput={(e) => {
+            const v = (e.target as HTMLInputElement).value;
+            setQ(v);
+            if (!v.trim()) {
+              setRes(null); // back to the lists
+              setErr("");
+            }
+          }}
+          aria-label="Search Hugging Face" />
         <button class="primary" type="submit" disabled={busy || !q.trim()}>{busy ? "…" : "Search"}</button>
       </form>
       <div class="row">
@@ -127,7 +203,7 @@ export function HubPanel() {
       </div>
       {err && <div class="error">{err}</div>}
       {res?.length === 0 && <div class="hint">No GGUF models found for “{q}”.</div>}
-      {res === null && !err && <div class="hint">Try “qwen3”, “gemma”, or paste a repo like unsloth/Qwen3-8B-GGUF. Large files can take a while; you can leave this tab and downloads continue.</div>}
+      {res === null && !err && <Browse dest={dest} />}
       {res?.map((m) => <Repo key={m.id} m={m} dest={dest} />)}
       <details class="fold">
         <summary>Hugging Face token (for gated models)</summary>

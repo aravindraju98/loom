@@ -682,3 +682,12 @@ select.think:hover { background: var(--surface-3); }
 .eval-table th { text-align: left; font-weight: 500; color: var(--text-3); font-size: var(--fs-xs); padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .eval-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); }
 .eval-table td.ok { color: var(--ok); font-weight: 600; }
+
+/* ---------------------------------------------------------------- hub lists */
+
+.hub-lists { margin: 10px 0 4px; }
+.hub-lists button { font-size: var(--fs-xs); padding: 4px 2px; }
+.skeleton-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.skeleton { height: 44px; border-radius: var(--r-md); background: linear-gradient(90deg, var(--surface-2), var(--surface-3), var(--surface-2)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+label.inline { white-space: nowrap; }

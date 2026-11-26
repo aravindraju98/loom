@@ -66,6 +66,83 @@ pub struct HfModel {
     pub id: String,
     pub downloads: u64,
     pub likes: u64,
+    /// "text-generation", "image-text-to-text" (vision)…
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<String>,
+    /// ISO date of the last update
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated: Option<String>,
+}
+
+fn to_model(m: &Value) -> Option<HfModel> {
+    Some(HfModel {
+        id: m["id"].as_str()?.to_string(),
+        downloads: m["downloads"].as_u64().unwrap_or(0),
+        likes: m["likes"].as_u64().unwrap_or(0),
+        pipeline: m["pipeline_tag"].as_str().map(String::from),
+        updated: m["lastModified"].as_str().map(String::from),
+    })
+}
+
+/// Publishers whose GGUF conversions are reliable and ungated.
+const TRUSTED: &[&str] = &[
+    "unsloth",
+    "bartowski",
+    "lmstudio-community",
+    "ggml-org",
+    "Qwen",
+    "mradermacher",
+    "MaziyarPanahi",
+    "google",
+    "mistralai",
+    "microsoft",
+    "ibm-granite",
+    "nvidia",
+];
+
+/// Drop models that aren't for chatting (speech, image/video generation, embeddings). Many good GGUF
+/// repos have no pipeline tag at all, so untagged ones stay when their name says GGUF.
+fn is_chat_model(m: &HfModel) -> bool {
+    match m.pipeline.as_deref() {
+        Some("text-generation" | "image-text-to-text" | "any-to-any" | "audio-text-to-text") => true,
+        Some(_) => false,
+        None => m.id.to_ascii_lowercase().contains("gguf"),
+    }
+}
+
+/// Model lists shown before searching. `list`: "recommended" | "trending" | "downloads" | "likes".
+#[tauri::command]
+pub async fn hf_browse(list: String) -> Result<Vec<HfModel>, String> {
+    let sort = match list.as_str() {
+        "downloads" => "downloads",
+        "likes" => "likes",
+        _ => "trendingScore",
+    };
+    let rb = client()?.get("https://huggingface.co/api/models").query(&[
+        ("filter", "gguf"),
+        ("sort", sort),
+        ("direction", "-1"),
+        ("limit", "200"),
+        ("expand[]", "downloads"),
+        ("expand[]", "likes"),
+        ("expand[]", "pipeline_tag"),
+        ("expand[]", "lastModified"),
+    ]);
+    let r = auth(rb).send().await.map_err(|e| format!("cannot reach huggingface.co: {e}"))?;
+    if !r.status().is_success() {
+        return Err(format!("Hugging Face returned {}", r.status()));
+    }
+    let v: Value = r.json().await.map_err(|e| e.to_string())?;
+    let all: Vec<HfModel> = v.as_array().map(|a| a.iter().filter_map(to_model).filter(is_chat_model).collect()).unwrap_or_default();
+    Ok(pick(all, &list))
+}
+
+fn pick(all: Vec<HfModel>, list: &str) -> Vec<HfModel> {
+    if list == "recommended" {
+        all.into_iter().filter(|m| TRUSTED.iter().any(|t| m.id.starts_with(&format!("{t}/")))).take(30).collect()
+    } else {
+        all.into_iter().take(30).collect()
+    }
 }
 
 #[tauri::command]
@@ -73,7 +150,7 @@ pub async fn hf_search(query: String) -> Result<Vec<HfModel>, String> {
     // pasting a repo id or URL goes straight to that repo
     if let Some(r) = parse_repo(&query) {
         if query.contains('/') {
-            return Ok(vec![HfModel { id: r, downloads: 0, likes: 0 }]);
+            return Ok(vec![HfModel { id: r, downloads: 0, likes: 0, pipeline: None, updated: None }]);
         }
     }
     let rb = client()?.get("https://huggingface.co/api/models").query(&[
@@ -82,25 +159,17 @@ pub async fn hf_search(query: String) -> Result<Vec<HfModel>, String> {
         ("sort", "downloads"),
         ("direction", "-1"),
         ("limit", "30"),
+        ("expand[]", "downloads"),
+        ("expand[]", "likes"),
+        ("expand[]", "pipeline_tag"),
+        ("expand[]", "lastModified"),
     ]);
     let r = auth(rb).send().await.map_err(|e| format!("cannot reach huggingface.co: {e}"))?;
     if !r.status().is_success() {
         return Err(format!("Hugging Face returned {}", r.status()));
     }
     let v: Value = r.json().await.map_err(|e| e.to_string())?;
-    Ok(v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|m| {
-                    Some(HfModel {
-                        id: m["id"].as_str()?.to_string(),
-                        downloads: m["downloads"].as_u64().unwrap_or(0),
-                        likes: m["likes"].as_u64().unwrap_or(0),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default())
+    Ok(v.as_array().map(|a| a.iter().filter_map(to_model).collect()).unwrap_or_default())
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -289,6 +358,19 @@ pub fn hf_cancel(hf: State<'_, Hf>, id: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browse_lists_only_chat_models_from_trusted_publishers() {
+        let m = |id: &str, p: Option<&str>| HfModel { id: id.into(), downloads: 0, likes: 0, pipeline: p.map(String::from), updated: None };
+        assert!(is_chat_model(&m("a/b", Some("text-generation"))));
+        assert!(is_chat_model(&m("a/b", Some("image-text-to-text"))));
+        assert!(!is_chat_model(&m("audio-cpp/x", Some("text-to-speech"))));
+        assert!(!is_chat_model(&m("x/Wan2.1", None)));
+        assert!(is_chat_model(&m("unsloth/Qwen3.8-27B-GGUF", None)));
+        let all = vec![m("unsloth/Q-GGUF", None), m("randomguy/X-GGUF", None), m("bartowski/G-GGUF", None), m("unslothx/fake", None)];
+        let rec: Vec<String> = pick(all, "recommended").into_iter().map(|m| m.id).collect();
+        assert_eq!(rec, ["unsloth/Q-GGUF", "bartowski/G-GGUF"]);
+    }
 
     #[test]
     fn repo_and_path_validation() {

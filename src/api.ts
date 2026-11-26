@@ -39,7 +39,16 @@ export interface Provider {
   model: string;
 }
 
-export interface HfModel { id: string; downloads: number; likes: number }
+export interface HfModel {
+  id: string;
+  downloads: number;
+  likes: number;
+  /** "text-generation", "image-text-to-text" (vision)… */
+  pipeline?: string;
+  /** ISO date of the last update */
+  updated?: string;
+}
+export type HfList = "recommended" | "trending" | "downloads" | "likes";
 export interface HfPart { path: string; size: number }
 export interface HfGroup { label: string; kind: "model" | "mmproj"; files: HfPart[]; total: number }
 export interface HfProgress {
@@ -321,6 +330,7 @@ export const api = {
     invoke<void>("engine_load", { modelId, engine, ctx }),
   engineUnload: () => invoke<void>("engine_unload"),
   hfSearch: (query: string) => invoke<HfModel[]>("hf_search", { query }),
+  hfBrowse: (list: HfList) => invoke<HfModel[]>("hf_browse", { list }),
   hfFiles: (repo: string) => invoke<HfGroup[]>("hf_files", { repo }),
   hfDownload: (repo: string, files: HfPart[], destDir: string) => invoke<string>("hf_download", { repo, files, destDir }),
   hfCancel: (id: string) => invoke<void>("hf_cancel", { id }),
