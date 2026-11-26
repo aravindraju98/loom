@@ -106,7 +106,14 @@ export interface Msg {
     change?: FileChange;
     /** tool messages: output replaced by a stub in prompts to save context */
     elided?: boolean;
+    /** update_plan results: the checklist */
+    plan?: PlanStep[];
   };
+}
+
+export interface PlanStep {
+  step: string;
+  status: "pending" | "in_progress" | "done";
 }
 
 export interface FileChange {
@@ -275,6 +282,8 @@ export const api = {
   chatLoad: (id: string) => invoke<Chat>("chat_load", { id }),
   chatSave: (id: string, chat: Chat) => invoke<void>("chat_save", { id, chat }),
   chatDelete: (id: string) => invoke<void>("chat_delete", { id }),
+  chatRename: (id: string, title: string) => invoke<void>("chat_rename", { id, title }),
+  saveTextFile: (path: string, text: string) => invoke<void>("save_text_file", { path, text }),
   modelsScan: () => invoke<ModelEntry[]>("models_scan"),
   engineStatus: () => invoke<EngineStatus>("engine_status"),
   engineLog: (lines = 150) => invoke<string[]>("engine_log", { lines }),

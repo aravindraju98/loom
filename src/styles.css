@@ -632,3 +632,43 @@ button.send { border-radius: var(--r-sm); padding: 4px 12px; }
 .chiplist { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
 .chiplist .chip { font-family: var(--mono); font-size: var(--fs-xs); }
 .code-edit-sm { font-family: var(--mono); font-size: var(--fs-sm); }
+
+/* ---------------------------------------------------------------- plan, context meter, meta actions */
+
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.plan { list-style: none; margin: 0; padding: 4px 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-md); }
+.plan li { display: flex; align-items: flex-start; gap: 8px; padding: 2px 0; color: var(--text-2); }
+.plan-box {
+  flex: none; width: 15px; height: 15px; margin-top: 2px; border-radius: 4px; border: 1.5px solid var(--border-strong);
+  display: grid; place-items: center; font-size: 10px; line-height: 1; color: var(--accent-fg);
+}
+.plan-done { color: var(--text-3); text-decoration: line-through; text-decoration-color: var(--border-strong); }
+.plan-done .plan-box { background: var(--ok); border-color: var(--ok); }
+.plan-in_progress { color: var(--text); font-weight: 500; }
+.plan-in_progress .plan-box { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--surface), inset 0 0 0 8px var(--accent); }
+.tool-plan { padding: 4px 12px 8px; border-top: 1px solid var(--border); }
+.plan-card {
+  margin: 0 max(24px, calc((100% - 820px) / 2)) 8px; padding: 2px 12px 6px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface);
+}
+.plan-head {
+  width: 100%; justify-content: flex-start; gap: 10px; min-height: 30px; padding: 4px 0;
+  border: 0; background: transparent; font-size: var(--fs-sm); color: var(--text-2); font-weight: 600;
+}
+.plan-head:hover:not(:disabled) { background: transparent; color: var(--text); }
+.plan-head .grow { text-align: left; }
+.plan-bar, .ctx-bar { position: relative; display: inline-block; height: 4px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
+.plan-bar { width: 80px; }
+.plan-bar i, .ctx-bar i { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 4px; }
+.ctx-meter { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-3); font-variant-numeric: tabular-nums; margin-right: 4px; }
+.ctx-bar { width: 44px; }
+.ctx-meter.warn .ctx-bar i { background: var(--warn); }
+.ctx-meter.bad .ctx-bar i { background: var(--bad); }
+.ctx-meter.bad { color: var(--bad); }
+select.think { max-width: 150px; background: transparent; border-color: transparent; color: var(--text-2); }
+select.think:hover { background: var(--surface-3); }
+.meta-actions { display: inline-flex; gap: 2px; margin-left: auto; opacity: 0; transition: opacity var(--ease); }
+.msg.assistant:hover .meta-actions, .meta-actions:focus-within { opacity: 1; }
+.meta .chip-btn { min-height: 22px; font-size: var(--fs-xs); }
+.side-search { margin: 0 2px; }
+.chatitem-edit { flex: 1; min-width: 0; margin: 2px; min-height: 28px; font-size: var(--fs-md); }

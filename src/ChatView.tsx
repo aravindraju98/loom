@@ -1,11 +1,58 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { Icon } from "./icons";
-import type { FileChange, Msg } from "./api";
+import type { FileChange, Msg, PlanStep } from "./api";
 import { md } from "./markdown";
 import {
-  answerPermission, attachments, busy, chat, draft, engine, live, pending, restoreReq, runError, runStatus, runningTool,
-  send, settings, stop, stripAttachments, toast, toolProgress, touched, useTools,
+  answerPermission, attachments, busy, chat, contextUse, currentPlan, draft, engine, live, pending, regenerate, restoreReq, runError,
+  runStatus, runningTool, send, settings, stop, stripAttachments, thinking, toast, toolProgress, touched, useTools,
 } from "./state";
+
+function PlanList({ steps }: { steps: PlanStep[] }) {
+  return (
+    <ol class="plan">
+      {steps.map((s, i) => (
+        <li key={i} class={`plan-${s.status}`}>
+          <span class="plan-box" aria-hidden="true">{s.status === "done" ? "✓" : ""}</span>
+          <span>{s.step}</span>
+          <span class="sr-only">{s.status === "done" ? " (done)" : s.status === "in_progress" ? " (in progress)" : ""}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** The model's current checklist, pinned above the composer while it works. */
+function PlanCard() {
+  const p = currentPlan.value;
+  const [open, setOpen] = useState(true);
+  if (!p || (!busy.value && p.every((s) => s.status === "done"))) return null;
+  const done = p.filter((s) => s.status === "done").length;
+  return (
+    <div class="plan-card">
+      <button class="plan-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span class="grow">Plan · {done}/{p.length} done</span>
+        <span class="plan-bar" aria-hidden="true"><i style={{ width: `${(done / p.length) * 100}%` }} /></span>
+      </button>
+      {open && <PlanList steps={p} />}
+    </div>
+  );
+}
+
+function k(n: number) {
+  return n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n);
+}
+
+function ContextMeter() {
+  const c = contextUse.value;
+  if (!c) return null;
+  const level = c.pct >= 85 ? "bad" : c.pct >= 70 ? "warn" : "";
+  return (
+    <span class={`ctx-meter ${level}`} title={`Context: ${c.used.toLocaleString()} of ${c.ctx.toLocaleString()} tokens. Old tool output is trimmed automatically near the limit.`}>
+      <span class="ctx-bar" aria-hidden="true"><i style={{ width: `${c.pct}%` }} /></span>
+      {k(c.used)} / {k(c.ctx)}
+    </span>
+  );
+}
 import { Diff, DiffStat } from "./ui/Diff";
 
 function fmtMs(ms: number): string {
@@ -100,6 +147,18 @@ function ToolCard({ name, args, result, callId }: { name: string; args: string; 
           : `${result.ui?.ok === false ? "failed" : "done"}${result.ui?.ms != null ? ` · ${fmtMs(result.ui.ms)}` : ""}`;
   const cls = waiting ? "wait" : running ? "run" : cancelled || !result ? "skip" : result.ui?.ok === false ? "bad" : "ok";
   const target = change?.path ?? argPath(args);
+  if (result?.ui?.plan) {
+    const p = result.ui.plan;
+    return (
+      <details class="tool ok">
+        <summary>
+          <span class="tool-name">plan</span>
+          <span class="tool-target">{p.filter((s) => s.status === "done").length}/{p.length} done</span>
+        </summary>
+        <div class="tool-plan"><PlanList steps={p} /></div>
+      </details>
+    );
+  }
   return (
     <details class={`tool ${cls}`} open={waiting}>
       <summary>
@@ -231,14 +290,33 @@ function MessageView({ m, all, index }: { m: Msg; all: Msg[]; index: number }) {
           result={all.find((x) => x.role === "tool" && x.tool_call_id === tc.id)}
         />
       ))}
-      {(m.ui?.cancelled || m.ui?.tok_s) && (
+      {(m.ui?.cancelled || m.ui?.tok_s || m.content) && (
         <div class="meta">
           {m.ui?.cancelled && <span class="badge">Stopped</span>}
-          {m.ui?.tok_s ? turnMeta(m.ui) : null}
+          {m.ui?.tok_s ? <span>{turnMeta(m.ui)}</span> : null}
+          {isLastAnswer(all, index) && (
+            <span class="meta-actions">
+              {m.content && (
+                <button class="chip-btn" onClick={() => void navigator.clipboard.writeText(m.content ?? "").then(() => toast("Copied", "info"))}>Copy</button>
+              )}
+              <button class="chip-btn" disabled={busy.value} title="Ask again (files are left as they are)" onClick={() => void regenerate()}>
+                <Icon name="refresh" size={12} /> Retry
+              </button>
+            </span>
+          )}
         </div>
       )}
     </div>
   );
+}
+
+/** the final assistant message of the latest request (where Retry makes sense) */
+function isLastAnswer(all: Msg[], index: number): boolean {
+  for (let i = all.length - 1; i >= 0; i--) {
+    if (all[i].role === "assistant") return i === index;
+    if (all[i].role === "user") return false;
+  }
+  return false;
 }
 
 function Composer() {
@@ -293,7 +371,21 @@ function Composer() {
           <Icon name="wrench" />
           {useTools.value && !settings.value?.workspace && <i class="warn-dot" />}
         </button>
+        {engine.value.engine !== "openai" && (
+          <select
+            class="mini think"
+            aria-label="Thinking"
+            title="For reasoning models (Qwen3 and similar). Off answers faster and saves context."
+            value={thinking.value}
+            onChange={(e) => (thinking.value = (e.target as HTMLSelectElement).value as typeof thinking.value)}
+          >
+            <option value="auto">Thinking: default</option>
+            <option value="on">Thinking: on</option>
+            <option value="off">Thinking: off</option>
+          </select>
+        )}
         <span class="spacer" />
+        <ContextMeter />
         {busy.value ? (
           <button class="danger" onClick={() => void stop()}>Stop</button>
         ) : (
@@ -360,6 +452,7 @@ export function ChatView() {
         )}
         {runError.value && <div class="error" role="alert">{runError.value}</div>}
       </div>
+      <PlanCard />
       <Composer />
     </div>
   );

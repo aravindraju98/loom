@@ -84,6 +84,88 @@ export const downloads = signal<Record<string, HfProgress>>({});
 
 export const busy = computed(() => runId.value !== null);
 
+/** reasoning models (Qwen3, DeepSeek-R1 distills…): "auto" leaves the model's default */
+export const thinking = signal<"auto" | "on" | "off">("auto");
+/** sidebar search */
+export const chatFilter = signal("");
+
+/** latest checklist from update_plan in this chat */
+export const currentPlan = computed(() => {
+  const ms = chat.value.messages;
+  for (let i = ms.length - 1; i >= 0; i--) {
+    const p = ms[i].ui?.plan;
+    if (p) return p;
+    if (ms[i].role === "user") return null; // plans belong to the latest request only
+  }
+  return null;
+});
+
+/** prompt tokens of the latest turn vs the context window, for the meter */
+export const contextUse = computed(() => {
+  const ctx = lastUsage.value?.ctx || (engine.value.engine !== "openai" ? settings.value?.ctx : 0) || 0;
+  let used = lastUsage.value?.prompt_tokens ?? 0;
+  if (!used) {
+    const ms = chat.value.messages;
+    for (let i = ms.length - 1; i >= 0; i--) {
+      if (ms[i].ui?.prompt_tokens) {
+        used = (ms[i].ui!.prompt_tokens ?? 0) + (ms[i].ui!.tokens ?? 0);
+        break;
+      }
+    }
+  }
+  return ctx > 0 && used > 0 ? { used, ctx, pct: Math.min(100, Math.round((used / ctx) * 100)) } : null;
+});
+
+export async function renameChat(id: string, title: string) {
+  const t = title.trim() || "Untitled";
+  try {
+    if (chat.value.id === id) {
+      chat.value = { ...chat.value, title: t };
+      await persist();
+    } else {
+      await api.chatRename(id, t);
+      await refreshChats();
+    }
+  } catch (e) {
+    toast(`Rename failed: ${errText(e)}`, "error");
+  }
+}
+
+/** The conversation as Markdown: prompts, answers, and one line per tool call. */
+export function chatMarkdown(c: Chat): string {
+  const out: string[] = [`# ${c.title}`, ""];
+  for (const m of c.messages) {
+    if (m.role === "user") out.push("## You", "", stripAttachments(m.content ?? ""), "");
+    else if (m.role === "assistant") {
+      if (m.content) out.push("## Assistant", "", m.content, "");
+      for (const tc of m.tool_calls ?? []) {
+        const res = c.messages.find((x) => x.role === "tool" && x.tool_call_id === tc.id);
+        const ch = res?.ui?.change;
+        out.push(`> \`${tc.function.name}\`${ch ? ` ${ch.path} (+${ch.added ?? 0} −${ch.removed ?? 0})` : ""}${res?.ui?.ok === false ? " — failed" : ""}`, "");
+      }
+    }
+  }
+  return out.join("\n");
+}
+
+/** Ask the model again for the last request (conversation only; files are left as they are). */
+export async function regenerate() {
+  if (busy.value) return;
+  const ms = chat.value.messages;
+  let idx = -1;
+  for (let i = ms.length - 1; i >= 0; i--) if (ms[i].role === "user") { idx = i; break; }
+  if (idx < 0) return;
+  const text = stripAttachments(ms[idx].content ?? "");
+  const atts = ms[idx].ui?.attachments ?? [];
+  chat.value = {
+    ...chat.value,
+    messages: ms.slice(0, idx),
+    branches: [...(chat.value.branches ?? []), { at: idx, created: Date.now(), messages: ms.slice(idx) }],
+  };
+  attachments.value = atts;
+  await send(text);
+}
+
 function uid(): string {
   return crypto.randomUUID().replace(/-/g, "");
 }
@@ -339,6 +421,8 @@ export async function send(text: string) {
       auto_approve: s.auto_approve,
       use_tools: useTools.value,
       checkpoint_id,
+      // chat-template switch understood by llama.cpp (--jinja) for Qwen3-style reasoning models
+      extra: thinking.value !== "auto" && engine.value.engine !== "openai" ? { chat_template_kwargs: { enable_thinking: thinking.value === "on" } } : undefined,
     });
   } catch (e) {
     runError.value = errText(e);

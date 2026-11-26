@@ -36,6 +36,8 @@ fn main() {
             store::chat_load,
             store::chat_save,
             store::chat_delete,
+            store::chat_rename,
+            store::save_text_file,
             models::models_scan,
             engine::engine_status,
             engine::engine_log,

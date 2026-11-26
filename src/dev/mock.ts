@@ -62,6 +62,19 @@ const messages: Msg[] = [
     tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: "src/utils/format.ts", outline: true }) } }],
     ui: { tok_s: 38.4, tokens: 41, prompt_tokens: 3120, cache_n: 0, prompt_ms: 1480 },
   },
+  {
+    role: "assistant", content: "",
+    tool_calls: [{ id: "t0", type: "function", function: { name: "update_plan", arguments: "{}" } }],
+  },
+  {
+    role: "tool", tool_call_id: "t0", name: "update_plan", content: "Plan updated",
+    ui: { ok: true, ms: 0, plan: [
+      { step: "Read formatBytes", status: "done" },
+      { step: "Fix the unit loop", status: "done" },
+      { step: "Run the format tests", status: "in_progress" },
+      { step: "Summarise the change", status: "pending" },
+    ] },
+  },
   { role: "tool", tool_call_id: "t1", name: "read_file", content: "src/utils/format.ts · outline · 48 lines · version 3f9a2c1b\n   11\texport function formatBytes(n: number): string {\n   23\texport function formatDuration(ms: number): string {", ui: { ok: true, ms: 4 } },
   {
     role: "assistant",

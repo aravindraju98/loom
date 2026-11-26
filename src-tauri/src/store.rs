@@ -333,6 +333,27 @@ pub fn chat_save(id: String, chat: Value) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn chat_rename(id: String, title: String) -> Result<(), String> {
+    let p = chats_dir().join(format!("{}.json", safe_id(&id)?));
+    let t = std::fs::read_to_string(&p).map_err(|e| format!("could not open chat: {e}"))?;
+    let mut j: Value = serde_json::from_str(&t).map_err(|e| e.to_string())?;
+    let title: String = title.trim().chars().take(120).collect();
+    j["title"] = json!(if title.is_empty() { "Untitled".to_string() } else { title });
+    save_chat_in(&chats_dir(), &id, &j)
+}
+
+/// Save text the user chose to export (chat as Markdown, logs…) to a path from a save dialog.
+#[tauri::command]
+pub fn save_text_file(path: String, text: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !matches!(ext.as_str(), "md" | "txt" | "json" | "jsonl") {
+        return Err("only .md, .txt, .json or .jsonl files can be exported".into());
+    }
+    write_atomic(&p, text.as_bytes()).map_err(|e| format!("could not write {path}: {e}"))
+}
+
+#[tauri::command]
 pub fn chat_delete(id: String) -> Result<(), String> {
     delete_chat_in(&chats_dir(), &id)?;
     crate::checkpoint::delete_chat(&id);

@@ -357,6 +357,25 @@ async fn await_permission(
     allowed && !ctl.is_cancelled()
 }
 
+/// Instructions a project keeps for coding agents, if the workspace has them.
+pub fn project_instructions(ws: &std::path::Path) -> Option<(String, String)> {
+    const NAMES: &[&str] = &["AGENTS.md", "CLAUDE.md", ".harness/instructions.md", ".github/copilot-instructions.md", ".cursorrules"];
+    const MAX: usize = 8_000;
+    for n in NAMES {
+        let p = ws.join(n);
+        if let Ok(bytes) = std::fs::read(&p) {
+            let text = crate::textfile::decode(&bytes).text;
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let body = if text.len() > MAX { format!("{}\n…[truncated]", &text[..text.floor_char_boundary(MAX)]) } else { text.to_string() };
+            return Some((n.to_string(), body));
+        }
+    }
+    None
+}
+
 fn trunc_out(s: String, max: usize) -> String {
     if s.len() <= max {
         return s;
@@ -419,6 +438,10 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
             "\n\nWorkspace folder: {}\nShell: PowerShell on Windows.\nTo change an existing file use edit_file (or edit_lines with line numbers from read_file); never rewrite a whole file to change a few lines. For a big file, read_file with outline=true first, then read only the part you need. Large new files: write the first part, then write_file with append=true for each next part (about 150 lines per call).",
             w.display()
         ));
+        if let Some((file, text)) = project_instructions(w) {
+            run.set(json!({"instructions": file}));
+            sys.push_str(&format!("\n\nProject instructions from {file} (follow them):\n{text}"));
+        }
     }
 
     let perms = crate::store::load_settings();
@@ -662,8 +685,10 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
             }
             ev(&app, &a.run_id, "tool_result", json!({"call_id":id,"ok":ok,"output":output,"ms":ms,"change":extra}));
             let mut ui = json!({"ok":ok,"ms":ms,"cancelled":cancelled});
-            if let Some(x) = extra {
-                ui["change"] = x;
+            match extra {
+                Some(x) if x.get("plan").is_some() => ui["plan"] = x["plan"].clone(),
+                Some(x) => ui["change"] = x,
+                None => {}
             }
             let tm = json!({"role":"tool","tool_call_id":id,"name":name,"content":output,"ui":ui});
             msgs.push(tm.clone());

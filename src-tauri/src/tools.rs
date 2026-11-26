@@ -127,6 +127,9 @@ pub fn schemas(tier: Tier) -> Vec<Value> {
                  "overwrite":{"type":"boolean","description":"replace an existing file entirely"}}), &["path", "content"]),
         f("run_shell", "Run a PowerShell command in the workspace and return its output.",
           json!({"command":{"type":"string"},"timeout_secs":{"type":"integer","description":"default 60, max 600"}}), &["command"]),
+        f("update_plan", "Keep a short checklist for multi-step tasks. Send the whole list each time; mark one step in_progress at a time.",
+          json!({"steps":{"type":"array","items":{"type":"object","properties":{
+                    "step":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","done"]}},"required":["step","status"]}}}), &["steps"]),
     ];
     if tier != Tier::Small {
         v.push(f("move_file", "Move or rename a file.", json!({"from":{"type":"string"},"to":{"type":"string"}}), &["from", "to"]));
@@ -143,7 +146,29 @@ pub fn needs_approval(name: &str) -> bool {
 }
 
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "read_file" | "list_dir" | "glob" | "grep" | "run_shell") || MUTATING.contains(&name)
+    matches!(name, "read_file" | "list_dir" | "glob" | "grep" | "run_shell" | "update_plan") || MUTATING.contains(&name)
+}
+
+/// Validate a plan from `update_plan` and summarise it.
+fn plan_tool(args: &Value) -> Result<ToolOut, String> {
+    let steps = args.get("steps").and_then(|s| s.as_array()).ok_or("give steps: [{step, status}]")?;
+    if steps.is_empty() || steps.len() > 30 {
+        return Err("a plan needs 1 to 30 steps".into());
+    }
+    let mut clean = vec![];
+    for s in steps {
+        let text = s.get("step").and_then(|x| x.as_str()).map(str::trim).filter(|t| !t.is_empty()).ok_or("every step needs text")?;
+        let status = match s.get("status").and_then(|x| x.as_str()).unwrap_or("pending") {
+            "done" | "completed" | "complete" => "done",
+            "in_progress" | "in progress" | "active" | "doing" => "in_progress",
+            _ => "pending",
+        };
+        clean.push(json!({"step": text.chars().take(200).collect::<String>(), "status": status}));
+    }
+    let done = clean.iter().filter(|s| s["status"] == "done").count();
+    let next = clean.iter().find(|s| s["status"] != "done").and_then(|s| s["step"].as_str()).unwrap_or("");
+    let text = if next.is_empty() { format!("Plan updated: all {done} steps done.") } else { format!("Plan updated: {done}/{} done. Next: {next}", clean.len()) };
+    Ok(ToolOut { text, ui: Some(json!({"plan": clean})) })
 }
 
 /// Resolve `p` against the workspace and refuse anything that lands outside it (.., symlinks, other drives).
@@ -663,6 +688,7 @@ pub async fn run(name: &str, args: &Value, ctx: &ToolCtx) -> Result<ToolOut, Str
             let c = plan(name, args, ctx)?;
             commit(c, ctx)
         }
+        "update_plan" => plan_tool(args),
         "read_file" => {
             let p = resolve(ws, arg_str(args, "path")?)?;
             let rel = ctx.rel(&p);
@@ -983,5 +1009,15 @@ mod tests {
         ok("delete_file", json!({"path":"sub/t.rs"}), &c).await;
         assert!(!ws.join("sub/t.rs").exists());
         assert!(schemas(Tier::Small).iter().all(|s| s["function"]["name"] != "move_file"));
+    }
+
+    #[tokio::test]
+    async fn plan_tool_normalises_statuses() {
+        let ws = tmp("plan");
+        let c = ctx(&ws);
+        let o = run("update_plan", &json!({"steps":[{"step":"read","status":"completed"},{"step":"fix","status":"in progress"},{"step":"test","status":"todo"}]}), &c).await.unwrap();
+        assert_eq!(o.text, "Plan updated: 1/3 done. Next: fix");
+        assert_eq!(o.ui.unwrap()["plan"][1]["status"], "in_progress");
+        assert!(run("update_plan", &json!({"steps":[]}), &c).await.is_err());
     }
 }
