@@ -24,6 +24,11 @@ export interface Settings {
   llama_extra_args: string;
   providers: Provider[];
   hf_token: string;
+  /** keys are stored in Windows Credential Manager (read-only for the UI) */
+  secrets_in_keyring?: boolean;
+  shell_allow: string[];
+  shell_deny: string[];
+  trusted: string[];
 }
 
 export interface Provider {
@@ -112,6 +117,17 @@ export interface FileChange {
   diff?: string;
 }
 
+export interface ShellPreview {
+  kind: "shell";
+  command: string;
+  /** matches a built-in destructive pattern: always asks */
+  dangerous: boolean;
+  /** suggested allow-list prefix, e.g. "git status" */
+  prefix: string;
+}
+
+export type PermScope = "once" | "chat" | "workspace" | "prefix";
+
 export interface Branch {
   /** index of the first message that was replaced */
   at: number;
@@ -187,7 +203,7 @@ export type AgentEvent = { run_id: string } & (
   | { type: "message"; message: Msg }
   | { type: "tool_progress"; name: string; chars: number }
   | { type: "tool_start"; call_id: string; name: string; args: unknown }
-  | { type: "permission"; call_id: string; name: string; args: unknown; preview?: FileChange | null }
+  | { type: "permission"; call_id: string; name: string; args: unknown; preview?: FileChange | ShellPreview | null }
   | { type: "tool_result"; call_id: string; ok: boolean; output: string; ms?: number; change?: FileChange | null }
   | { type: "pruned"; call_ids: string[] }
   | {
@@ -272,8 +288,8 @@ export const api = {
   providerModels: (baseUrl: string, apiKey: string) => invoke<string[]>("provider_models", { baseUrl, apiKey }),
   agentRun: (args: RunArgs) => invoke<void>("agent_run", { args }),
   agentCancel: (runId: string) => invoke<void>("agent_cancel", { runId }),
-  permissionReply: (callId: string, chatId: string, tool: string, allow: boolean, always: boolean) =>
-    invoke<void>("permission_reply", { callId, chatId, tool, allow, always }),
+  permissionReply: (callId: string, chatId: string, tool: string, allow: boolean, scope: PermScope, workspace: string, prefix?: string) =>
+    invoke<void>("permission_reply", { callId, chatId, tool, allow, always: scope === "chat", scope, workspace, prefix }),
   checkpointPlan: (chatId: string, ids: string[]) => invoke<PlanItem[]>("checkpoint_plan", { chatId, ids }),
   checkpointRestore: (chatId: string, ids: string[], force: boolean) =>
     invoke<{ undo_id: string; restored: string[] }>("checkpoint_restore", { chatId, ids, force }),

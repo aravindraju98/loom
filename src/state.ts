@@ -1,6 +1,6 @@
 import { signal, computed } from "@preact/signals";
 import { api, onAgentEvent, onEvent, onHfProgress, onLogBatch } from "./api";
-import type { HfProgress, Chat, ChatSummary, EngineStatus, FileChange, LogEntry, McpServer, ModelEntry, Msg, Settings, AgentEvent, Usage } from "./api";
+import type { HfProgress, Chat, ChatSummary, EngineStatus, FileChange, LogEntry, McpServer, ModelEntry, Msg, PermScope, Settings, ShellPreview, AgentEvent, Usage } from "./api";
 
 /* ---------- logs ---------- */
 
@@ -59,7 +59,7 @@ export const loadError = signal("");
 
 export const runId = signal<string | null>(null);
 export const live = signal({ content: "", reasoning: "" });
-export const pending = signal<{ call_id: string; name: string; args: unknown; preview?: FileChange | null } | null>(null);
+export const pending = signal<{ call_id: string; name: string; args: unknown; preview?: FileChange | ShellPreview | null } | null>(null);
 /** checkpoint id -> number of files the agent changed while answering that message */
 export const touched = signal<Record<string, number>>({});
 /** the restore dialog: which user message (index) to go back to */
@@ -351,12 +351,17 @@ export async function stop() {
   if (runId.value) await api.agentCancel(runId.value);
 }
 
-export async function answerPermission(allow: boolean, always: boolean) {
+export async function answerPermission(allow: boolean, scope: PermScope = "once") {
   const p = pending.value;
   if (!p) return;
   pending.value = null;
+  const prefix = p.preview && p.preview.kind === "shell" ? p.preview.prefix : undefined;
   try {
-    await api.permissionReply(p.call_id, chat.value.id, p.name, allow, always);
+    await api.permissionReply(p.call_id, chat.value.id, p.name, allow, scope, settings.value?.workspace ?? "", prefix);
+    if (allow && (scope === "workspace" || scope === "prefix")) {
+      await refreshSettings();
+      toast(scope === "prefix" ? `"${prefix}" commands will run without asking. Change this in Settings.` : `${p.name} is now trusted in this workspace. Change this in Settings.`, "info");
+    }
   } catch (e) {
     toast(errText(e), "error");
   }

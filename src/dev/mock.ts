@@ -32,6 +32,9 @@ const settings: Settings = {
   llama_extra_args: "",
   providers: [],
   hf_token: "",
+  shell_allow: ["git status", "npm test"],
+  shell_deny: [],
+  trusted: [],
 };
 
 const diff = `--- a/src/utils/format.ts
@@ -164,7 +167,11 @@ export function installMock() {
   );
   // open the sample chat once the app has loaded
   setTimeout(() => {
-    void import("../state").then((s) => s.openChat("c1"));
+    void import("../state").then((s) => {
+      // the app's own module instance, for scripted UI checks
+      (window as unknown as { __state: typeof s }).__state = s;
+      void s.openChat("c1");
+    });
   }, 50);
   (window as unknown as { __mockEmit: typeof emit }).__mockEmit = emit;
 }

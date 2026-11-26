@@ -10,6 +10,7 @@ mod hf;
 mod log;
 mod mcp;
 mod models;
+mod policy;
 mod store;
 mod textfile;
 mod toolparse;

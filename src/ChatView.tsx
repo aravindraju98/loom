@@ -127,26 +127,53 @@ function ToolCard({ name, args, result, callId }: { name: string; args: string; 
 function PermissionBar({ name, args }: { name: string; args: string }) {
   const p = pending.value;
   const preview = p?.preview;
+  const shell = preview && preview.kind === "shell" ? preview : null;
+  const file = preview && preview.kind !== "shell" ? preview : null;
+  const [more, setMore] = useState(false);
+  const what = FILE_TOOLS.has(name) ? "file changes" : name === "run_shell" ? "commands" : name;
   return (
     <div class="perm">
-      {preview ? (
+      {file ? (
         <>
           <div class="perm-head">
-            <span>{preview.kind === "create" ? "Create" : preview.kind === "delete" ? "Delete" : preview.kind === "move" ? "Move" : "Change"} <code>{preview.path}</code></span>
-            <DiffStat added={preview.added} removed={preview.removed} />
+            <span>{file.kind === "create" ? "Create" : file.kind === "delete" ? "Delete" : file.kind === "move" ? "Move" : "Change"} <code>{file.path}</code></span>
+            <DiffStat added={file.added} removed={file.removed} />
           </div>
-          <ChangeView c={preview} />
+          <ChangeView c={file} />
         </>
-      ) : name === "run_shell" ? (
-        <pre class="tool-args">{(() => { try { return String((JSON.parse(args) as { command?: string }).command ?? args); } catch { return args; } })()}</pre>
+      ) : shell ? (
+        <>
+          {shell.dangerous && (
+            <div class="perm-warn" role="alert">This command can change things outside the workspace or can't be undone. Read it carefully.</div>
+          )}
+          <pre class="tool-args shell-cmd">{shell.command}</pre>
+        </>
       ) : (
         <pre class="tool-args">{pretty(args)}</pre>
       )}
       <div class="perm-actions">
-        <button class="primary" data-autofocus onClick={() => answerPermission(true, false)}>Allow once</button>
-        <button onClick={() => answerPermission(true, true)}>Allow {FILE_TOOLS.has(name) ? "edits" : name === "run_shell" ? "commands" : "this tool"} for this chat</button>
+        <button class="primary" data-autofocus onClick={() => void answerPermission(true, "once")}>Allow once</button>
+        {!shell?.dangerous && (
+          <div class="split">
+            <button onClick={() => void answerPermission(true, "chat")}>Allow {what} in this chat</button>
+            <button class="split-more" aria-label="More options" aria-expanded={more} onClick={() => setMore(!more)}><Icon name="chevron" size={12} /></button>
+            {more && (
+              <div class="menu-pop" role="menu">
+                {shell ? (
+                  <button role="menuitem" class="menu-item" onClick={() => void answerPermission(true, "prefix")}>
+                    Always allow <code>{shell.prefix}</code> commands
+                  </button>
+                ) : (
+                  <button role="menuitem" class="menu-item" onClick={() => void answerPermission(true, "workspace")}>
+                    Always allow {what} in this workspace
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         <span class="spacer" />
-        <button class="danger" onClick={() => answerPermission(false, false)}>Deny</button>
+        <button class="danger" onClick={() => void answerPermission(false)}>Deny</button>
       </div>
     </div>
   );

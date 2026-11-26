@@ -615,3 +615,20 @@ button.send { border-radius: var(--r-sm); padding: 4px 12px; }
 .tl-meta { color: var(--text-3); font-size: var(--fs-xs); }
 .tl-err { font-family: var(--mono); font-size: var(--fs-xs); color: var(--bad); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tl-note .tl-meta { color: var(--warn); }
+
+/* ---------------------------------------------------------------- approvals */
+
+.perm-warn { margin: 10px 12px 0; padding: 8px 10px; border-radius: var(--r-sm); background: var(--warn-soft); color: var(--warn); font-size: var(--fs-md); }
+.shell-cmd { color: var(--text); background: var(--code-bg); }
+.split { position: relative; display: inline-flex; }
+.split > button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.split-more { width: 28px; padding: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; }
+.menu-pop {
+  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 20; min-width: 260px; padding: 4px;
+  background: var(--surface-2); border-radius: var(--r-md); box-shadow: var(--shadow-pop); animation: rise 120ms var(--ease) both;
+}
+.menu-pop .menu-item { white-space: normal; font-size: var(--fs-md); }
+.menu-pop code { font-size: var(--fs-sm); }
+.chiplist { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.chiplist .chip { font-family: var(--mono); font-size: var(--fs-xs); }
+.code-edit-sm { font-family: var(--mono); font-size: var(--fs-sm); }

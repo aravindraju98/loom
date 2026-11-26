@@ -14,7 +14,10 @@
       { "label": "main", "title": "Harness", "width": 1360, "height": 860, "minWidth": 900, "minHeight": 600,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPmeUI" }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; object-src 'none'; base-uri 'none'; frame-src 'none'"
+    }
   },
   "bundle": {
     "active": true,

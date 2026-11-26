@@ -56,6 +56,16 @@ pub struct Settings {
     pub providers: Vec<Provider>,
     /// optional Hugging Face access token (gated models)
     pub hf_token: String,
+    /// keys above are kept in Windows Credential Manager, not in settings.json
+    pub secrets_in_keyring: bool,
+
+    // --- permissions ---
+    /// shell commands starting with one of these run without asking (e.g. "git status", "npm test")
+    pub shell_allow: Vec<String>,
+    /// shell commands containing one of these are refused
+    pub shell_deny: Vec<String>,
+    /// tools trusted in a workspace without asking: "tool_name@C:\path\to\workspace"
+    pub trusted: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -95,6 +105,10 @@ impl Default for Settings {
             llama_extra_args: String::new(),
             providers: vec![],
             hf_token: String::new(),
+            secrets_in_keyring: false,
+            shell_allow: vec![],
+            shell_deny: vec![],
+            trusted: vec![],
         }
     }
 }
@@ -103,18 +117,78 @@ fn settings_path() -> PathBuf {
     data_dir().join("settings.json")
 }
 
-pub fn load_settings() -> Settings {
+fn load_settings_file() -> Settings {
     std::fs::read_to_string(settings_path())
         .ok()
         .and_then(|s| serde_json::from_str(s.trim_start_matches('\u{feff}')).ok())
         .unwrap_or_default()
 }
 
+pub fn load_settings() -> Settings {
+    let mut s = load_settings_file();
+    if s.secrets_in_keyring {
+        s.api_key = kr_get("api_key").unwrap_or_default();
+        s.hf_token = kr_get("hf_token").unwrap_or_default();
+        for p in s.providers.iter_mut() {
+            p.api_key = kr_get(&format!("provider:{}", p.id)).unwrap_or_default();
+        }
+    }
+    s
+}
+
+// ---- secrets in the OS credential store ------------------------------------------------------
+
+const KR_SERVICE: &str = "harness";
+
+fn kr_get(name: &str) -> Option<String> {
+    keyring::Entry::new(KR_SERVICE, name).ok()?.get_password().ok()
+}
+
+fn kr_set(name: &str, value: &str) -> Result<(), String> {
+    let e = keyring::Entry::new(KR_SERVICE, name).map_err(|e| e.to_string())?;
+    if value.is_empty() {
+        match e.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(x) => Err(x.to_string()),
+        }
+    } else {
+        e.set_password(value).map_err(|e| e.to_string())
+    }
+}
+
+/// Store every secret in the credential store; returns a copy with secrets blanked for disk.
+fn move_secrets_out(s: &Settings) -> Result<Settings, String> {
+    let prev = load_settings_file();
+    kr_set("api_key", &s.api_key)?;
+    kr_set("hf_token", &s.hf_token)?;
+    for p in &s.providers {
+        kr_set(&format!("provider:{}", p.id), &p.api_key)?;
+    }
+    for old in prev.providers.iter().filter(|o| !s.providers.iter().any(|p| p.id == o.id)) {
+        let _ = kr_set(&format!("provider:{}", old.id), "");
+    }
+    let mut disk = s.clone();
+    disk.api_key.clear();
+    disk.hf_token.clear();
+    for p in disk.providers.iter_mut() {
+        p.api_key.clear();
+    }
+    disk.secrets_in_keyring = true;
+    Ok(disk)
+}
+
 /// Serialises every settings read-modify-write so two panels saving at once can't clobber each other.
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn save_settings(s: &Settings) -> Result<(), String> {
-    let t = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
+    let disk = match move_secrets_out(s) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::log::error("app", &format!("credential store unavailable, keys saved in settings.json: {e}"));
+            Settings { secrets_in_keyring: false, ..s.clone() }
+        }
+    };
+    let t = serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
     write_atomic(&settings_path(), t.as_bytes()).map_err(|e| format!("could not save settings: {e}"))?;
     // keep the log redactor in step with the keys it must hide
     let mut secrets = vec![s.api_key.clone(), s.hf_token.clone()];

@@ -1,6 +1,15 @@
-//! File explorer commands (user-driven, so not confined to the agent workspace).
+//! File explorer commands for the Files panel. Confined to the chosen workspace folder so the
+//! webview (which renders model output) can never be used to read arbitrary files.
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+fn in_workspace(path: &str) -> Result<PathBuf, String> {
+    let ws = crate::store::load_settings().workspace;
+    if ws.trim().is_empty() {
+        return Err("choose a workspace folder first".into());
+    }
+    crate::tools::resolve(Path::new(&ws), path)
+}
 
 #[derive(Serialize)]
 pub struct FsEntry {
@@ -14,6 +23,7 @@ const HIDDEN: &[&str] = &[".git", "node_modules", "$RECYCLE.BIN", "System Volume
 
 #[tauri::command]
 pub fn fs_list(path: String) -> Result<Vec<FsEntry>, String> {
+    let path = in_workspace(&path)?;
     let mut out = vec![];
     for e in std::fs::read_dir(&path).map_err(|e| e.to_string())?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -43,13 +53,14 @@ pub struct Preview {
 #[tauri::command]
 pub fn fs_read(path: String) -> Result<Preview, String> {
     use std::io::Read;
+    let path = in_workspace(&path)?;
     let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
     let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; 200_000.min(size as usize)];
     f.read_exact(&mut buf).map_err(|e| e.to_string())?;
-    let binary = buf.iter().take(8000).any(|b| *b == 0);
+    let binary = crate::textfile::looks_binary(&buf);
     Ok(Preview {
-        text: if binary { String::new() } else { String::from_utf8_lossy(&buf).into_owned() },
+        text: if binary { String::new() } else { crate::textfile::decode(&buf).text },
         truncated: size as usize > buf.len(),
         binary,
         size,
@@ -68,7 +79,10 @@ pub fn open_url(url: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn fs_reveal(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
+    let p = in_workspace(&path)?;
+    if !p.exists() {
+        return Err("not found".into());
+    }
     let mut c = std::process::Command::new("explorer");
     if p.is_file() {
         c.arg(format!("/select,{}", p.display()));

@@ -328,9 +328,7 @@ pub fn llama_args(m: &models::ModelEntry, s: &store::Settings, ctx: u32, port: u
     if s.parallel > 0 {
         a.extend(["-np".into(), s.parallel.to_string()]);
     }
-    if !s.api_key.is_empty() {
-        a.extend(["--api-key".into(), s.api_key.clone()]);
-    }
+    // the API key goes in LLAMA_API_KEY (set by engine_load), not argv, so it isn't visible in the process list
     if vision {
         if let Some(p) = &m.mmproj {
             a.push("--mmproj".into());
@@ -419,6 +417,9 @@ pub async fn engine_load(
         .ok_or_else(|| format!("model not in the library ({model_id}); press Rescan"))?;
     let use_engine = engine.unwrap_or_else(|| m.engine.clone());
     let ctx = ctx.unwrap_or(settings.ctx);
+    if settings.serve_on_network && settings.api_key.trim().len() < 8 {
+        return Err("Serving on the network needs an API key of at least 8 characters (Server tab). Without one, anyone on your network could use this machine.".into());
+    }
 
     eng.stop(None).await;
     eng.log.lk().clear();
@@ -454,6 +455,11 @@ pub async fn engine_load(
         let mut c = Command::new(exe);
         c.current_dir(exe.parent().unwrap_or(Path::new(".")))
             .args(llama_args(&m, &settings, ctx, port, vision.unwrap_or(true)));
+        if !settings.api_key.is_empty() {
+            c.env("LLAMA_API_KEY", &settings.api_key);
+        } else {
+            c.env_remove("LLAMA_API_KEY");
+        }
         (c, port, "/health", m.name.clone())
     };
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);

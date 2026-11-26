@@ -3,6 +3,8 @@ import type { Settings } from "./api";
 import { changedFields, refreshModels, saveSettings, settings, settingsOpen } from "./state";
 import { Modal } from "./ui/Modal";
 
+const lines = (v: string) => v.split("\n").map((x) => x.trim()).filter(Boolean);
+
 export function SettingsModal() {
   // the values when the dialog opened: only fields edited here are saved
   const [orig] = useState<Settings>(() => ({ ...(settings.value as Settings) }));
@@ -65,7 +67,31 @@ export function SettingsModal() {
         <input type="checkbox" checked={s.auto_approve} onChange={(e) => set("auto_approve", (e.target as HTMLInputElement).checked)} />
         Auto-approve file changes, shell commands and MCP tools (no prompts)
       </label>
-      {s.auto_approve && <div class="hint">File changes can still be undone with Restore checkpoint; shell commands cannot.</div>}
+      {s.auto_approve && <div class="hint">File changes can still be undone with Restore checkpoint; shell commands cannot. Dangerous commands still ask.</div>}
+
+      <div class="section-title">Permissions</div>
+      <label>Shell commands that run without asking (one prefix per line)
+        <textarea rows={3} class="code-edit-sm" placeholder={"git status\nnpm test"} value={(s.shell_allow ?? []).join("\n")}
+          onInput={(e) => set("shell_allow", lines((e.target as HTMLTextAreaElement).value))} />
+      </label>
+      <label>Shell commands that are always refused (one per line, matched anywhere)
+        <textarea rows={2} class="code-edit-sm" placeholder={"git push\nInvoke-WebRequest"} value={(s.shell_deny ?? []).join("\n")}
+          onInput={(e) => set("shell_deny", lines((e.target as HTMLTextAreaElement).value))} />
+      </label>
+      <div class="hint">Commands that chain others (<code>;</code> <code>&&</code> <code>|</code> <code>&gt;</code>) always ask, even when their start is on the list.</div>
+      {(s.trusted ?? []).length > 0 && (
+        <>
+          <label style={{ marginBottom: 0 }}>Tools trusted per workspace</label>
+          <div class="chiplist">
+            {s.trusted.map((t) => (
+              <span class="chip" key={t}>
+                {t.replace("@", " in ")}
+                <button class="x" aria-label={`Stop trusting ${t}`} onClick={() => set("trusted", s.trusted.filter((x) => x !== t))}>×</button>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
     </Modal>
   );
 }

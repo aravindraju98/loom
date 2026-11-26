@@ -136,7 +136,7 @@ export function HubPanel() {
           onChange={(e) => void saveSettings({ hf_token: (e.target as HTMLInputElement).value.trim() })}
           aria-label="Hugging Face token"
         />
-        <div class="hint">Stored in plain text in settings.json. Only sent to huggingface.co.</div>
+        <div class="hint">Stored in Windows Credential Manager. Only sent to huggingface.co.</div>
       </details>
     </div>
   );

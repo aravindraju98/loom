@@ -56,9 +56,11 @@ export function ServerPanel() {
         <input type="checkbox" checked={s.serve_on_network} onChange={(e) => set("serve_on_network", (e.target as HTMLInputElement).checked)} />
         Serve on the local network (0.0.0.0)
       </label>
-      {s.serve_on_network && !s.api_key && <div class="error small">Anyone on your network could use this model. Set an API key.</div>}
-      <label>API key (optional, required on /v1/* when set)
-        <input type="text" placeholder="none" value={s.api_key} onInput={(e) => set("api_key", txt(e))} />
+      {s.serve_on_network && s.api_key.trim().length < 8 && (
+        <div class="error small">Serving on the network requires an API key of at least 8 characters; the model won't start without one.</div>
+      )}
+      <label>API key {s.serve_on_network ? "(required)" : "(optional)"}
+        <input type="password" autoComplete="off" placeholder="none" value={s.api_key} onInput={(e) => set("api_key", txt(e))} />
       </label>
       <div class="grid2">
         <label>PolyStrata port
@@ -199,7 +201,7 @@ export function RemoteEndpoints() {
             <button onClick={() => { setEdit(null); setMsg(""); }}>Cancel</button>
             <button class="primary" onClick={() => void save()}>Save</button>
           </div>
-          <div class="hint">The key is stored in plain text in settings.json on this PC.</div>
+          <div class="hint">The key is stored in Windows Credential Manager on this PC.</div>
         </div>
       ) : (
         <button class="wide" onClick={() => { setEdit({ id: crypto.randomUUID().replace(/-/g, "").slice(0, 12), name: "", base_url: "", api_key: "", model: "" }); setIds([]); setMsg(""); }}>

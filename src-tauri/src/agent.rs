@@ -1,6 +1,6 @@
 //! The chat/agent loop: stream a completion, run requested tools (with approval), repeat.
 use crate::util::LockExt;
-use crate::{checkpoint, context, engine::Engine, mcp::Mcp, toolparse, tools, trace};
+use crate::{checkpoint, context, engine::Engine, mcp::Mcp, policy, toolparse, tools, trace};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -421,6 +421,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
         ));
     }
 
+    let perms = crate::store::load_settings();
     let mut msgs: Vec<Value> = repair_history(&a.messages);
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut budget = (ep.ctx > 0).then(|| context::Budget::new(ep.ctx as usize, sys.len() + Value::from(tool_defs.clone()).to_string().len()));
@@ -609,10 +610,20 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
                 (false, format!("You already called {name} with these exact arguments {} times; the result will not change. Try a different approach or answer the user.", n_seen - 1), None)
             } else if let Some(Err(e)) = &planned {
                 (false, e.clone(), None)
+            } else if let Some(d) = (name == "run_shell").then(|| policy::denied_by(args["command"].as_str().unwrap_or(""), &perms.shell_deny)).flatten() {
+                (false, format!("Blocked: the command matches \"{d}\" on the user's shell deny list. Do not retry it; find another way or ask the user."), None)
             } else {
                 let risky = if builtin { tools::needs_approval(&name) } else { !mcp_ro.contains(&name) };
-                let pre_ok = !risky || a.auto_approve || agent.always.lk().contains(&(a.chat_id.clone(), name.clone()));
-                let preview = planned.as_ref().and_then(|p| p.as_ref().ok()).cloned();
+                let cmd = args["command"].as_str().unwrap_or("");
+                let dangerous = name == "run_shell" && policy::is_dangerous(cmd);
+                let trusted = perms.trusted.contains(&policy::trust_key(&name, &a.workspace));
+                let shell_ok = name == "run_shell" && policy::allowed_by(cmd, &perms.shell_allow);
+                let pre_ok = !risky
+                    || (!dangerous && (a.auto_approve || trusted || shell_ok || agent.always.lk().contains(&(a.chat_id.clone(), name.clone()))));
+                let mut preview = planned.as_ref().and_then(|p| p.as_ref().ok()).cloned();
+                if name == "run_shell" {
+                    preview = Some(json!({"kind":"shell","command":cmd,"dangerous":dangerous,"prefix":policy::suggest_prefix(cmd)}));
+                }
                 let allowed = pre_ok || await_permission(&app, &agent, &ctl, &a.run_id, &id, &name, &args, preview).await;
                 if ctl.is_cancelled() {
                     (false, CANCELLED_TOOL.to_string(), None)
@@ -705,10 +716,48 @@ pub fn agent_cancel(agent: State<'_, Agent>, run_id: String) {
     }
 }
 
+/// `scope`: "once" | "chat" (until the app closes) | "workspace" (saved: trust this tool here) |
+/// "prefix" (saved: run_shell commands starting with `prefix` no longer ask).
 #[tauri::command]
-pub fn permission_reply(agent: State<'_, Agent>, call_id: String, chat_id: String, tool: String, allow: bool, always: bool) {
-    if allow && always {
-        agent.always.lk().insert((chat_id, tool));
+#[allow(clippy::too_many_arguments)]
+pub fn permission_reply(
+    agent: State<'_, Agent>,
+    call_id: String,
+    chat_id: String,
+    tool: String,
+    allow: bool,
+    always: bool,
+    scope: Option<String>,
+    workspace: Option<String>,
+    prefix: Option<String>,
+) {
+    let scope = scope.unwrap_or_else(|| if always { "chat".into() } else { "once".into() });
+    if allow {
+        match scope.as_str() {
+            "chat" => {
+                agent.always.lk().insert((chat_id, tool.clone()));
+            }
+            "workspace" => {
+                if let Some(ws) = workspace.filter(|w| !w.is_empty()) {
+                    let mut s = crate::store::load_settings();
+                    let k = policy::trust_key(&tool, &ws);
+                    if !s.trusted.contains(&k) {
+                        s.trusted.push(k);
+                        let _ = crate::store::patch_settings(&json!({"trusted": s.trusted}));
+                    }
+                }
+            }
+            "prefix" => {
+                if let Some(p) = prefix.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+                    let mut s = crate::store::load_settings();
+                    if !s.shell_allow.iter().any(|x| x.eq_ignore_ascii_case(&p)) {
+                        s.shell_allow.push(p);
+                        let _ = crate::store::patch_settings(&json!({"shell_allow": s.shell_allow}));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     if let Some(tx) = agent.perms.lk().remove(&call_id) {
         let _ = tx.send(allow);

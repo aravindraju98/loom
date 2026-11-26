@@ -35,9 +35,25 @@ function normalizeMath(src: string): string {
     .join("");
 }
 
+// Model output can be steered by file contents or tool results (prompt injection). A remote image
+// would make the app fetch an attacker URL that can carry data in its query string, so remote
+// images become plain links; only inline data: images are shown.
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  if (node.tagName === "IMG") {
+    const src = node.getAttribute("src") ?? "";
+    if (!/^data:image\/(png|jpe?g|gif|webp);/i.test(src)) {
+      const a = document.createElement("a");
+      a.textContent = `[image: ${node.getAttribute("alt") || src}]`;
+      if (/^https?:\/\//i.test(src)) a.setAttribute("href", src);
+      node.replaceWith(a);
+    }
+  }
+  if (node.tagName === "A") node.setAttribute("rel", "noreferrer noopener");
+});
+
 export function md(src: string): string {
   const html = marked.parse(normalizeMath(src ?? ""), { async: false }) as string;
-  const clean = DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
+  const clean = DOMPurify.sanitize(html, { ADD_ATTR: ["target"], FORBID_TAGS: ["style", "form", "input", "button", "iframe", "object", "embed"] });
   // copy button on every code block (wired by a delegated click handler in main.tsx)
   return clean
     .replace(/<pre><code/g, '<div class="codewrap"><button type="button" class="copy">Copy</button><pre><code')
