@@ -22,9 +22,18 @@ pub struct Agent {
 }
 
 #[derive(Default)]
-struct RunCtl {
+pub(crate) struct RunCtl {
     cancelled: AtomicBool,
     notify: Notify,
+    /// no user is watching (evals): approvals are denied instead of waiting for a click
+    headless: bool,
+    /// every message the run produced, for headless callers
+    transcript: Mutex<Vec<Value>>,
+}
+
+fn emit_msg(app: &AppHandle, ctl: &RunCtl, run_id: &str, m: &Value) {
+    ctl.transcript.lk().push(m.clone());
+    ev(app, run_id, "message", json!({ "message": m }));
 }
 
 impl RunCtl {
@@ -333,6 +342,9 @@ async fn stream_turn(
 
 #[allow(clippy::too_many_arguments)]
 async fn await_permission(app: &AppHandle, agent: &Agent, ctl: &RunCtl, run_id: &str, call_id: &str, name: &str, args: &Value, preview: Option<Value>) -> bool {
+    if ctl.headless {
+        return false;
+    }
     let (tx, rx) = oneshot::channel();
     agent.perms.lk().insert(call_id.to_string(), tx);
     ev(app, run_id, "permission", json!({"call_id":call_id,"name":name,"args":args,"preview":preview}));
@@ -500,7 +512,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
                     if !asm.reasoning.is_empty() {
                         am["reasoning_content"] = json!(asm.reasoning);
                     }
-                    ev(&app, &a.run_id, "message", json!({"message":am}));
+                    emit_msg(&app, &ctl, &a.run_id, &am);
                 }
                 return Ok("cancelled");
             }
@@ -569,7 +581,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
                 json!(calls.iter().map(|(id, n, args)| json!({"id":id,"type":"function","function":{"name":n,"arguments":args}})).collect::<Vec<_>>());
         }
         msgs.push(am.clone());
-        ev(&app, &a.run_id, "message", json!({"message":am}));
+        emit_msg(&app, &ctl, &a.run_id, &am);
         if calls.is_empty() {
             if asm.finish.as_deref() == Some("length") {
                 return Ok("length");
@@ -583,7 +595,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
                 cancelled = true;
                 let tm = json!({"role":"tool","tool_call_id":id,"name":name,"content":CANCELLED_TOOL,"ui":{"ok":false,"cancelled":true}});
                 msgs.push(tm.clone());
-                ev(&app, &a.run_id, "message", json!({"message":tm}));
+                emit_msg(&app, &ctl, &a.run_id, &tm);
                 continue;
             }
             let mut args = toolparse::repair_json(&args_s).unwrap_or(Value::Null);
@@ -657,7 +669,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
                 json!({
                     "name": name, "args": args_short, "ok": ok, "ms": ms, "out_chars": output.len(),
                     "error": (!ok).then(|| output.chars().take(300).collect::<String>()),
-                    "change": extra.as_ref().map(|c| json!({"path": c["path"], "added": c["added"], "removed": c["removed"]})),
+                    "change": extra.as_ref().map(|c| json!({"path": c["path"], "kind": c["kind"], "added": c["added"], "removed": c["removed"]})),
                 }),
             );
             if !ok && !cancelled {
@@ -672,7 +684,7 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>, run: &trace::Run
             }
             let tm = json!({"role":"tool","tool_call_id":id,"name":name,"content":output,"ui":ui});
             msgs.push(tm.clone());
-            ev(&app, &a.run_id, "message", json!({"message":tm}));
+            emit_msg(&app, &ctl, &a.run_id, &tm);
         }
         if cancelled {
             return Ok("cancelled");
@@ -707,6 +719,24 @@ pub async fn agent_run(app: AppHandle, agent: State<'_, Agent>, args: RunArgs) -
         app2.state::<Agent>().runs.lk().remove(&run_id);
     });
     Ok(())
+}
+
+/// Run the agent with nobody watching (evals): approvals are denied, nothing is persisted as a chat.
+/// Returns how the run ended and every message it produced. Cancel it with `agent_cancel(run_id)`.
+pub(crate) async fn run_headless(app: &AppHandle, args: RunArgs) -> (Result<&'static str, String>, Vec<Value>) {
+    let ctl = Arc::new(RunCtl { headless: true, ..Default::default() });
+    let agent = app.state::<Agent>();
+    agent.runs.lk().insert(args.run_id.clone(), ctl.clone());
+    let run_id = args.run_id.clone();
+    let run = trace::Run::start(&run_id, json!({"chat_id": args.chat_id, "eval": true, "workspace": args.workspace}));
+    let r = run_loop(app.clone(), args, ctl.clone(), &run).await;
+    match &r {
+        Ok(reason) => run.finish(reason, None),
+        Err(e) => run.finish("error", Some(e)),
+    }
+    agent.runs.lk().remove(&run_id);
+    let transcript = std::mem::take(&mut *ctl.transcript.lk());
+    (r, transcript)
 }
 
 #[tauri::command]

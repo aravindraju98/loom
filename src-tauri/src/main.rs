@@ -4,6 +4,7 @@ mod agent;
 mod checkpoint;
 mod context;
 mod engine;
+mod eval;
 mod fsx;
 mod gguf;
 mod hf;
@@ -60,6 +61,10 @@ fn main() {
             log::logs_clear,
             log::logs_export,
             log::logs_open_dir,
+            eval::eval_list,
+            eval::eval_run,
+            eval::eval_cancel,
+            eval::eval_results,
             trace::trace_list,
             trace::trace_get,
             mcp::mcp_status,

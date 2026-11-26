@@ -273,6 +273,36 @@ export interface RunSummary {
 
 export type TraceEvent = { kind: string; t: number } & Record<string, unknown>;
 
+export interface EvalScenario { id: string; name: string; prompt: string }
+export interface EvalResult {
+  scenario: string;
+  name: string;
+  passed: boolean;
+  detail: string;
+  ms: number;
+  end: string;
+  turns: number;
+  tool_calls: number;
+  tool_errors: number;
+  edit_failures: number;
+  rewrites: number;
+  recovered: number;
+  completion_tokens: number;
+}
+export interface EvalBatch {
+  id: string;
+  started: number;
+  ms: number;
+  model: string;
+  engine: string;
+  ctx: number;
+  passed: number;
+  total: number;
+  cancelled: boolean;
+  results: EvalResult[];
+}
+export interface EvalProgress { batch: string; index: number; total: number; scenario: string; status: "running" | "done"; result?: EvalResult }
+
 export const api = {
   settingsGet: () => invoke<Settings>("settings_get"),
   settingsSet: (settings: Settings) => invoke<void>("settings_set", { settings }),
@@ -311,6 +341,10 @@ export const api = {
   logsOpenDir: () => invoke<void>("logs_open_dir"),
   traceList: (limit?: number, chatId?: string) => invoke<RunSummary[]>("trace_list", { limit, chatId }),
   traceGet: (runId: string) => invoke<{ summary: RunSummary; events: TraceEvent[] }>("trace_get", { runId }),
+  evalList: () => invoke<EvalScenario[]>("eval_list"),
+  evalRun: (ids?: string[]) => invoke<EvalBatch>("eval_run", { ids }),
+  evalCancel: () => invoke<void>("eval_cancel"),
+  evalResults: (limit?: number) => invoke<EvalBatch[]>("eval_results", { limit }),
   mcpStatus: () => invoke<McpServer[]>("mcp_status"),
   mcpGetConfig: () => invoke<string>("mcp_get_config"),
   mcpSaveConfig: (text: string) => invoke<void>("mcp_save_config", { text }),
@@ -321,7 +355,8 @@ export const api = {
 };
 
 export const onAgentEvent = (cb: (e: AgentEvent) => void) => listen<AgentEvent>("agent-event", (e) => cb(e.payload));
-export const onLogBatch = (cb: (e: LogEntry[]) => void) => listen<LogEntry[]>("log-batch", (e) => cb(e.payload));
+export const onEvalProgress = (cb: (e: EvalProgress) => void) => listen<EvalProgress>("eval-progress", (e) => cb(e.payload));
+export const onLogBatch =(cb: (e: LogEntry[]) => void) => listen<LogEntry[]>("log-batch", (e) => cb(e.payload));
 export const onHfProgress =(cb: (e: HfProgress) => void) => listen<HfProgress>("hf-progress", (e) => cb(e.payload));
 export const onEvent = (name: string, cb: () => void) => listen(name, () => cb());
 

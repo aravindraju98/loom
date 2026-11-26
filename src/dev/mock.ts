@@ -141,6 +141,23 @@ const models = [
   { id: "m3", name: "gemma-3-12b-it", arch: "gemma3", quant: "Q5_K_M", size_bytes: 8.4e9, ctx_train: 131072, moe: false, parts: [], mmproj: "x", engine: "llama", auto_engine: "llama", profile: null },
 ];
 
+const evalScenarios = [
+  { id: "fix_bug", name: "Fix a one-line bug", prompt: "" },
+  { id: "rename", name: "Rename across two files", prompt: "" },
+  { id: "insert_large", name: "Add a function to a 300-line file", prompt: "" },
+  { id: "json_multi", name: "Change two settings in JSON", prompt: "" },
+  { id: "find_value", name: "Find a value in a large file", prompt: "" },
+  { id: "create_file", name: "Create a new file", prompt: "" },
+];
+
+function evalBatch(model: string, started: number, pass: boolean[]) {
+  const results = evalScenarios.map((s, i) => ({
+    scenario: s.id, name: s.name, passed: pass[i], detail: pass[i] ? "" : "original line changed or lost", ms: 6000 + i * 2100, end: "done",
+    turns: 3 + (i % 3), tool_calls: 3 + i, tool_errors: pass[i] ? 0 : 2, edit_failures: pass[i] ? 0 : 2, rewrites: pass[i] ? 0 : 1, recovered: i === 1 ? 1 : 0, completion_tokens: 300,
+  }));
+  return { id: `b${started}`, started, ms: 60000, model, engine: "llama", ctx: 16384, passed: pass.filter(Boolean).length, total: pass.length, cancelled: false, results };
+}
+
 export function installMock() {
   mockWindows("main");
   mockIPC(
@@ -166,6 +183,8 @@ export function installMock() {
         case "logs_tail": return logs;
         case "trace_list": return [run.summary, { ...run.summary, run_id: "r0", started: now - 7.2e6, ms: 4200, turns: 1, tool_calls: 0, reason: "error", error: "context_overflow: the conversation no longer fits", prompt_tokens: 0, cached_tokens: 0 }];
         case "trace_get": return run;
+        case "eval_list": return evalScenarios;
+        case "eval_results": return [evalBatch("qwen2.5-coder-7b-instruct-q4_k_m", now - 3.6e6, [true, true, false, true, true, true]), evalBatch("gemma-3-12b-it-Q5_K_M", now - 8.64e7, [true, false, false, true, true, true])];
         case "fs_list": return [
           { name: "src", path: `${WS}\\src`, is_dir: true, size: 0 },
           { name: "tests", path: `${WS}\\tests`, is_dir: true, size: 0 },

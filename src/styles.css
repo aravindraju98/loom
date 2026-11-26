@@ -672,3 +672,13 @@ select.think:hover { background: var(--surface-3); }
 .meta .chip-btn { min-height: 22px; font-size: var(--fs-xs); }
 .side-search { margin: 0 2px; }
 .chatitem-edit { flex: 1; min-width: 0; margin: 2px; min-height: 28px; font-size: var(--fs-md); }
+
+/* ---------------------------------------------------------------- evals */
+
+.eval-list li { align-items: flex-start; }
+.eval-list .dot { margin-top: 6px; }
+.eval-main { display: flex; flex-direction: column; min-width: 0; }
+.eval-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.eval-table th { text-align: left; font-weight: 500; color: var(--text-3); font-size: var(--fs-xs); padding: 4px 6px; border-bottom: 1px solid var(--border); }
+.eval-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); }
+.eval-table td.ok { color: var(--ok); font-weight: 600; }

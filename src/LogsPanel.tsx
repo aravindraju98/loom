@@ -3,6 +3,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import type { LogEntry, RunSummary, TraceEvent } from "./api";
 import { Icon } from "./icons";
+import { EvalsView } from "./EvalsView";
 import { chat, errText, inspectRun, logs, openChat, toast, unseenErrors } from "./state";
 
 const LEVELS = ["info", "warn", "error"] as const;
@@ -270,7 +271,7 @@ function RunInspector({ id }: { id: string }) {
 }
 
 export function LogsPanel() {
-  const [view, setView] = useState<"live" | "runs">("live");
+  const [view, setView] = useState<"live" | "runs" | "evals">("live");
   useEffect(() => {
     unseenErrors.value = 0;
   }, []);
@@ -282,8 +283,9 @@ export function LogsPanel() {
       <div class="segmented" role="tablist" aria-label="Logs view">
         <button role="tab" aria-selected={view === "live"} class={view === "live" ? "on" : ""} onClick={() => { setView("live"); inspectRun.value = null; }}>Live log</button>
         <button role="tab" aria-selected={view === "runs"} class={view === "runs" ? "on" : ""} onClick={() => setView("runs")}>Runs</button>
+        <button role="tab" aria-selected={view === "evals"} class={view === "evals" ? "on" : ""} onClick={() => { setView("evals"); inspectRun.value = null; }}>Evals</button>
       </div>
-      {view === "live" ? <LiveLog /> : inspectRun.value ? <RunInspector id={inspectRun.value} /> : <RunList />}
+      {view === "live" ? <LiveLog /> : view === "evals" ? <EvalsView /> : inspectRun.value ? <RunInspector id={inspectRun.value} /> : <RunList />}
     </div>
   );
 }
