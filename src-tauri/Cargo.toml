@@ -21,3 +21,5 @@ uuid = { version = "1", features = ["v4"] }
 similar = "2"
 sha2 = "0.10"
 keyring = { version = "3", features = ["windows-native"] }
+notify = "8"
+trash = "5"

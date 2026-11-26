@@ -291,6 +291,28 @@ impl Store {
         Ok(textfile::unified(&now, &then, &name, 3))
     }
 
+    /// The content of `path` before the first of `ids` changed it (None = it didn't exist).
+    pub fn file_base(&self, chat: &str, ids: &[String], path: &str) -> Result<Option<String>, String> {
+        let rec = self.selected(chat, ids).iter().find_map(|m| m.files.get(path).cloned()).ok_or("file not changed by the agent in these messages")?;
+        if rec.skipped {
+            return Err("file was too large to snapshot".into());
+        }
+        match rec.before {
+            Some(sha) => Ok(Some(textfile::decode(&self.get_blob(chat, &sha)?).text)),
+            None => Ok(None),
+        }
+    }
+
+    /// Put one file back to how it was before the first of `ids`.
+    pub fn revert_file(&self, chat: &str, ids: &[String], path: &str) -> Result<(), String> {
+        let rec = self.selected(chat, ids).iter().find_map(|m| m.files.get(path).cloned()).ok_or("file not changed by the agent in these messages")?;
+        if rec.skipped {
+            return Err("file was too large to snapshot".into());
+        }
+        let _g = LOCK.lk();
+        self.write_state(chat, Path::new(path), rec.before.as_deref())
+    }
+
     /// Which checkpoints (of `ids`) changed files; used to badge messages in the UI.
     pub fn touched(&self, chat: &str, ids: &[String]) -> BTreeMap<String, usize> {
         ids.iter().filter_map(|id| self.load(chat, id).map(|m| (id.clone(), m.files.len()))).filter(|(_, n)| *n > 0).collect()
@@ -361,6 +383,16 @@ pub fn checkpoint_undo(chat_id: String, undo_id: String) -> Result<Vec<String>, 
 #[tauri::command]
 pub fn checkpoint_diff(chat_id: String, ids: Vec<String>, path: String) -> Result<String, String> {
     store().file_diff(&chat_id, &ids, &path)
+}
+
+#[tauri::command]
+pub fn checkpoint_file_base(chat_id: String, ids: Vec<String>, path: String) -> Result<Option<String>, String> {
+    store().file_base(&chat_id, &ids, &path)
+}
+
+#[tauri::command]
+pub fn checkpoint_revert_file(chat_id: String, ids: Vec<String>, path: String) -> Result<(), String> {
+    store().revert_file(&chat_id, &ids, &path)
 }
 
 #[tauri::command]
@@ -447,6 +479,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "v0");
         // diff preview and badges
         assert!(s.touched("c1", &ids).contains_key("m1"));
+        // single-file base + revert
+        agent_write(&s, "m2", &f, Some("v2"));
+        let key = f.to_string_lossy().into_owned();
+        let m2 = vec!["m2".to_string()];
+        assert_eq!(s.file_base("c1", &m2, &key).unwrap().as_deref(), Some("v0"));
+        s.revert_file("c1", &m2, &key).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "v0");
     }
 
     #[test]

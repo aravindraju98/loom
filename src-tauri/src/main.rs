@@ -58,6 +58,8 @@ fn main() {
             checkpoint::checkpoint_undo,
             checkpoint::checkpoint_diff,
             checkpoint::checkpoint_touched,
+            checkpoint::checkpoint_file_base,
+            checkpoint::checkpoint_revert_file,
             log::logs_tail,
             log::logs_clear,
             log::logs_export,
@@ -75,6 +77,12 @@ fn main() {
             fsx::fs_list,
             fsx::fs_read,
             fsx::fs_reveal,
+            fsx::fs_open,
+            fsx::fs_save,
+            fsx::fs_create,
+            fsx::fs_rename,
+            fsx::fs_delete,
+            fsx::fs_watch,
             fsx::open_url,
         ])
         .setup(|app| {
