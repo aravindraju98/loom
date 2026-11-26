@@ -1,6 +1,6 @@
 //! The chat/agent loop: stream a completion, run requested tools (with approval), repeat.
 use crate::util::LockExt;
-use crate::{engine::Engine, mcp::Mcp, toolparse, tools};
+use crate::{checkpoint, context, engine::Engine, mcp::Mcp, toolparse, tools};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -47,6 +47,9 @@ pub struct RunArgs {
     pub use_tools: bool,
     /// extra top-level request fields (e.g. chat_template_kwargs)
     pub extra: Option<Value>,
+    /// restore point for file changes made while answering this message
+    #[serde(default)]
+    pub checkpoint_id: Option<String>,
 }
 
 #[derive(Default, Debug)]
@@ -147,7 +150,11 @@ fn ev(app: &AppHandle, run_id: &str, ty: &str, mut payload: Value) {
 }
 
 fn strip_for_send(m: &Value) -> Value {
+    let elided = context::is_elided(m).then(|| context::stub(m));
     let mut m = m.clone();
+    if let Some(s) = elided {
+        m["content"] = json!(s);
+    }
     if let Some(o) = m.as_object_mut() {
         o.remove("reasoning_content");
         o.remove("ui");
@@ -324,6 +331,7 @@ async fn stream_turn(
     Ok(Streamed::Done(asm))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn await_permission(
     app: &AppHandle,
     agent: &Agent,
@@ -332,16 +340,25 @@ async fn await_permission(
     call_id: &str,
     name: &str,
     args: &Value,
+    preview: Option<Value>,
 ) -> bool {
     let (tx, rx) = oneshot::channel();
     agent.perms.lk().insert(call_id.to_string(), tx);
-    ev(app, run_id, "permission", json!({"call_id":call_id,"name":name,"args":args}));
+    ev(app, run_id, "permission", json!({"call_id":call_id,"name":name,"args":args,"preview":preview}));
     let allowed = tokio::select! {
         r = rx => r.unwrap_or(false),
         _ = ctl.notify.notified() => false,
     };
     agent.perms.lk().remove(call_id);
     allowed && !ctl.is_cancelled()
+}
+
+fn trunc_out(s: String, max: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let cut = s.floor_char_boundary(max);
+    format!("{}\n...[output truncated: {} more characters]", &s[..cut], s.len() - cut)
 }
 
 /// Same tool + same arguments this many times in one run means the model is stuck.
@@ -368,11 +385,14 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
 
     let ws = if a.workspace.is_empty() { None } else { Some(PathBuf::from(&a.workspace)) };
+    let tier = tools::Tier::from_ctx(ep.ctx, ep.local);
+    let recorder = a.checkpoint_id.as_ref().map(|id| checkpoint::Recorder { chat: a.chat_id.clone(), id: id.clone() });
+    let tctx = ws.as_ref().map(|w| tools::ToolCtx::new(w.clone(), tier, recorder));
     let mut tool_defs: Vec<Value> = vec![];
     let mut mcp_ro: HashSet<String> = HashSet::new();
     if a.use_tools {
         if ws.is_some() {
-            tool_defs.extend(tools::schemas());
+            tool_defs.extend(tools::schemas(tier));
         }
         for (d, ro) in mcp.tool_defs() {
             if ro {
@@ -390,14 +410,27 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
     let mut sys = a.system_prompt.clone();
     if let Some(w) = &ws {
         sys.push_str(&format!(
-            "\n\nWorkspace folder: {}\nShell: PowerShell on Windows.\nPrefer edit_file for changes to existing files; rewrite whole files only when creating them. Large new files: write the first part, then write_file with append=true for each next part (about 150 lines per call).",
+            "\n\nWorkspace folder: {}\nShell: PowerShell on Windows.\nTo change an existing file use edit_file (or edit_lines with line numbers from read_file); never rewrite a whole file to change a few lines. For a big file, read_file with outline=true first, then read only the part you need. Large new files: write the first part, then write_file with append=true for each next part (about 150 lines per call).",
             w.display()
         ));
     }
 
     let mut msgs: Vec<Value> = repair_history(&a.messages);
     let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut budget = (ep.ctx > 0).then(|| context::Budget::new(ep.ctx as usize, sys.len() + Value::from(tool_defs.clone()).to_string().len()));
     for _turn in 0..a.max_turns.max(1) {
+        if let Some(b) = &budget {
+            let idx = context::plan_prune(&msgs, b, 2);
+            if !idx.is_empty() {
+                context::apply(&mut msgs, &idx);
+                let ids: Vec<&str> = idx.iter().filter_map(|&i| msgs[i]["tool_call_id"].as_str()).collect();
+                ev(&app, &a.run_id, "pruned", json!({"call_ids":ids}));
+                ev(&app, &a.run_id, "notice", json!({"text":format!("Context nearly full: removed {} old tool outputs from the prompt.", ids.len())}));
+                if let Some(c) = &tctx {
+                    c.forget_reads();
+                }
+            }
+        }
         let mut send: Vec<Value> = vec![json!({"role":"system","content":sys})];
         send.extend(msgs.iter().map(strip_for_send));
         let mut body = json!({
@@ -454,6 +487,16 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
                 return Ok("cancelled");
             }
         };
+        // learn this model's real chars-per-token so the budget gets accurate
+        let prompt_total = asm.prompt_tokens.or(asm.prompt_n.zip(asm.cache_n).map(|(p, c)| p + c));
+        if let (Some(b), Some(pt)) = (budget.as_mut(), prompt_total) {
+            let sent: usize = msgs.iter().map(context::sent_chars).sum::<usize>();
+            let fixed_chars = sys.len() + Value::from(tool_defs.clone()).to_string().len();
+            if pt > 200 {
+                b.chars_per_token = Some((sent + fixed_chars) as f64 / pt as f64);
+                b.fixed = b.tokens(fixed_chars);
+            }
+        }
         let secs = started.elapsed().as_secs_f64();
         let toks = asm.completion_tokens.unwrap_or(asm.chunks);
         let tok_s = asm.server_tok_s.unwrap_or(if secs > 0.0 { toks as f64 / secs } else { 0.0 });
@@ -532,33 +575,42 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
                 *c += 1;
                 *c
             };
-            let (ok, output) = if !known.contains(&name) {
-                (false, format!("Unknown tool '{name}'. Available tools: {}.", known.iter().cloned().collect::<Vec<_>>().join(", ")))
+            let builtin = tools::is_builtin(&name);
+            // file changes are worked out before asking, so a bad edit fails fast and a good one
+            // is shown to the user as a diff
+            let planned = match (&tctx, builtin && tools::needs_approval(&name) && name != "run_shell") {
+                (Some(c), true) if args.is_object() => Some(tools::plan(&name, &args, c).map(|ch| ch.preview())),
+                _ => None,
+            };
+            let (ok, output, extra) = if !known.contains(&name) {
+                (false, format!("Unknown tool '{name}'. Available tools: {}.", known.iter().cloned().collect::<Vec<_>>().join(", ")), None)
             } else if !args.is_object() {
-                (false, format!("Arguments must be a JSON object; could not parse: {}", args_s.chars().take(300).collect::<String>()))
+                (false, format!("Arguments must be a JSON object; could not parse: {}", args_s.chars().take(300).collect::<String>()), None)
             } else if n_seen > REPEAT_LIMIT {
-                (false, format!("You already called {name} with these exact arguments {} times; the result will not change. Try a different approach or answer the user.", n_seen - 1))
+                (false, format!("You already called {name} with these exact arguments {} times; the result will not change. Try a different approach or answer the user.", n_seen - 1), None)
+            } else if let Some(Err(e)) = &planned {
+                (false, e.clone(), None)
             } else {
-                let builtin = tools::is_builtin(&name);
                 let risky = if builtin { tools::needs_approval(&name) } else { !mcp_ro.contains(&name) };
                 let pre_ok = !risky || a.auto_approve || agent.always.lk().contains(&(a.chat_id.clone(), name.clone()));
-                let allowed = pre_ok || await_permission(&app, &agent, &ctl, &a.run_id, &id, &name, &args).await;
+                let preview = planned.as_ref().and_then(|p| p.as_ref().ok()).cloned();
+                let allowed = pre_ok || await_permission(&app, &agent, &ctl, &a.run_id, &id, &name, &args, preview).await;
                 if ctl.is_cancelled() {
-                    (false, CANCELLED_TOOL.to_string())
+                    (false, CANCELLED_TOOL.to_string(), None)
                 } else if !allowed {
-                    (false, "The user denied this tool call.".to_string())
+                    (false, "The user denied this tool call.".to_string(), None)
                 } else if builtin {
-                    match &ws {
-                        Some(w) => match tools::run(&name, &args, w).await {
-                            Ok(o) => (true, o),
-                            Err(e) => (false, e),
+                    match &tctx {
+                        Some(c) => match tools::run(&name, &args, c).await {
+                            Ok(o) => (true, o.text, o.ui),
+                            Err(e) => (false, e, None),
                         },
-                        None => (false, "no workspace folder is selected".to_string()),
+                        None => (false, "no workspace folder is selected".to_string(), None),
                     }
                 } else {
                     match mcp.call(&name, args.clone()).await {
-                        Ok(o) => (true, o),
-                        Err(e) => (false, e),
+                        Ok(o) => (true, trunc_out(o, tier.max_out()), None),
+                        Err(e) => (false, e, None),
                     }
                 }
             };
@@ -566,8 +618,12 @@ async fn run_loop(app: AppHandle, a: RunArgs, ctl: Arc<RunCtl>) -> Result<&'stat
             if ctl.is_cancelled() {
                 cancelled = true;
             }
-            ev(&app, &a.run_id, "tool_result", json!({"call_id":id,"ok":ok,"output":output,"ms":ms}));
-            let tm = json!({"role":"tool","tool_call_id":id,"name":name,"content":output,"ui":{"ok":ok,"ms":ms,"cancelled":cancelled}});
+            ev(&app, &a.run_id, "tool_result", json!({"call_id":id,"ok":ok,"output":output,"ms":ms,"change":extra}));
+            let mut ui = json!({"ok":ok,"ms":ms,"cancelled":cancelled});
+            if let Some(x) = extra {
+                ui["change"] = x;
+            }
+            let tm = json!({"role":"tool","tool_call_id":id,"name":name,"content":output,"ui":ui});
             msgs.push(tm.clone());
             ev(&app, &a.run_id, "message", json!({"message":tm}));
         }

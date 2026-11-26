@@ -104,15 +104,37 @@ function Node({ e, depth, onPick }: { e: FsEntry; depth: number; onPick: (e: FsE
     setOpen(!open);
   };
   return (
-    <div>
-      <div class="node" style={{ paddingLeft: 8 + depth * 14 }} onClick={() => void toggle()} title={e.path}>
+    <div role="none">
+      <div
+        class="node"
+        role="treeitem"
+        tabIndex={0}
+        aria-expanded={e.is_dir ? open : undefined}
+        aria-level={depth + 1}
+        style={{ paddingLeft: 8 + depth * 14 }}
+        onClick={() => void toggle()}
+        onKeyDown={(ev) => {
+          if (ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            void toggle();
+          } else if (ev.key === "ArrowRight" && e.is_dir && !open) {
+            ev.preventDefault();
+            void toggle();
+          } else if (ev.key === "ArrowLeft" && e.is_dir && open) {
+            ev.preventDefault();
+            setOpen(false);
+          }
+        }}
+        title={e.path}
+      >
         <span class="caret" aria-hidden="true">{e.is_dir && (
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform 160ms" }}><path d="m9 6 6 6-6 6" /></svg>
         )}</span>
         <span class={e.is_dir ? "dir" : "file"}>{e.name}</span>
       </div>
       {err && <div class="error small" style={{ marginLeft: 20 }}>{err}</div>}
-      {open && kids?.map((k) => <Node key={k.path} e={k} depth={depth + 1} onPick={onPick} />)}
+      {open && kids?.length === 0 && !err && <div class="hint small" style={{ paddingLeft: 30 + depth * 14 }}>(empty)</div>}
+      {open && kids && kids.length > 0 && <div role="group">{kids.map((k) => <Node key={k.path} e={k} depth={depth + 1} onPick={onPick} />)}</div>}
     </div>
   );
 }
@@ -149,7 +171,8 @@ export function FilesPanel() {
       </div>
       <div class="hint ws">{ws || "The agent can only touch files inside the workspace folder."}</div>
       {err && <div class="error">{err}</div>}
-      <div class="tree">{root.map((e) => <Node key={e.path} e={e} depth={0} onPick={pick} />)}</div>
+      {ws && root.length === 0 && !err && <div class="hint">This folder is empty.</div>}
+      <div class="tree" role="tree" aria-label="Workspace files">{root.map((e) => <Node key={e.path} e={e} depth={0} onPick={pick} />)}</div>
       {sel && (
         <div class="preview">
           <div class="row">
@@ -170,7 +193,16 @@ export function McpPanel() {
   const [text, setText] = useState("");
   const [msg, setMsg] = useState("");
   const [editing, setEditing] = useState(false);
-  useEffect(() => { void api.mcpGetConfig().then(setText); }, []);
+  useEffect(() => { void api.mcpGetConfig().then(setText).catch((e) => setMsg(String(e))); }, []);
+  const jsonErr = (() => {
+    if (!editing || !text.trim()) return "";
+    try {
+      const v = JSON.parse(text) as { mcpServers?: unknown };
+      return v && typeof v.mcpServers === "object" && v.mcpServers !== null ? "" : 'The config needs an "mcpServers" object.';
+    } catch (e) {
+      return `Invalid JSON: ${(e as Error).message}`;
+    }
+  })();
 
   const save = async () => {
     try {
@@ -198,9 +230,10 @@ export function McpPanel() {
       </div>
       {editing && (
         <>
-          <textarea class="code-edit" value={text} spellcheck={false} onInput={(e) => setText((e.target as HTMLTextAreaElement).value)} />
+          <textarea class="code-edit" aria-label="MCP config (JSON)" aria-invalid={!!jsonErr} value={text} spellcheck={false} onInput={(e) => setText((e.target as HTMLTextAreaElement).value)} />
+          {jsonErr && <div class="error small" role="alert">{jsonErr}</div>}
           <div class="row">
-            <button class="primary" onClick={() => void save()}>Save</button>
+            <button class="primary" disabled={!!jsonErr} onClick={() => void save()}>Save</button>
             <button onClick={() => setText(example)}>Insert example</button>
           </div>
         </>

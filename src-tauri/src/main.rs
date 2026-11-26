@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod checkpoint;
+mod context;
 mod engine;
 mod fsx;
 mod gguf;
@@ -8,6 +10,7 @@ mod hf;
 mod mcp;
 mod models;
 mod store;
+mod textfile;
 mod toolparse;
 mod tools;
 mod util;
@@ -43,6 +46,11 @@ fn main() {
             agent::agent_run,
             agent::agent_cancel,
             agent::permission_reply,
+            checkpoint::checkpoint_plan,
+            checkpoint::checkpoint_restore,
+            checkpoint::checkpoint_undo,
+            checkpoint::checkpoint_diff,
+            checkpoint::checkpoint_touched,
             mcp::mcp_status,
             mcp::mcp_get_config,
             mcp::mcp_save_config,

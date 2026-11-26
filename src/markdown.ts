@@ -4,7 +4,6 @@ import markedKatex from "marked-katex-extension";
 import hljs from "highlight.js/lib/common";
 import DOMPurify from "dompurify";
 import "katex/dist/katex.min.css";
-import "highlight.js/styles/github-dark.css";
 
 marked.use(
   markedHighlight({

@@ -255,7 +255,9 @@ pub fn chat_save(id: String, chat: Value) -> Result<(), String> {
 
 #[tauri::command]
 pub fn chat_delete(id: String) -> Result<(), String> {
-    delete_chat_in(&chats_dir(), &id)
+    delete_chat_in(&chats_dir(), &id)?;
+    crate::checkpoint::delete_chat(&id);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,11 +1,12 @@
 import { signal, computed } from "@preact/signals";
 import { api, onAgentEvent, onEvent, onHfProgress } from "./api";
-import type { HfProgress, Chat, ChatSummary, EngineStatus, McpServer, ModelEntry, Msg, Settings, AgentEvent, Usage } from "./api";
+import type { HfProgress, Chat, ChatSummary, EngineStatus, FileChange, McpServer, ModelEntry, Msg, Settings, AgentEvent, Usage } from "./api";
 
 /* ---------- notifications ---------- */
 
 export type ToastKind = "info" | "success" | "error";
-export interface Toast { id: number; kind: ToastKind; text: string }
+export interface ToastAction { label: string; run: () => void | Promise<void> }
+export interface Toast { id: number; kind: ToastKind; text: string; action?: ToastAction }
 export const toasts = signal<Toast[]>([]);
 let toastSeq = 0;
 
@@ -13,11 +14,11 @@ export function dismissToast(id: number) {
   toasts.value = toasts.value.filter((t) => t.id !== id);
 }
 
-/** Show a short message. Errors stay until dismissed; others fade after a few seconds. */
-export function toast(text: string, kind: ToastKind = "info") {
+/** Show a short message. Errors and toasts with an action stay longer; others fade after 4 s. */
+export function toast(text: string, kind: ToastKind = "info", action?: ToastAction) {
   const id = ++toastSeq;
-  toasts.value = [...toasts.value.slice(-4), { id, kind, text }];
-  if (kind !== "error") setTimeout(() => dismissToast(id), 4000);
+  toasts.value = [...toasts.value.slice(-4), { id, kind, text, action }];
+  if (kind !== "error") setTimeout(() => dismissToast(id), action ? 12000 : 4000);
 }
 
 export function errText(e: unknown): string {
@@ -39,7 +40,13 @@ export const loadError = signal("");
 
 export const runId = signal<string | null>(null);
 export const live = signal({ content: "", reasoning: "" });
-export const pending = signal<{ call_id: string; name: string; args: unknown } | null>(null);
+export const pending = signal<{ call_id: string; name: string; args: unknown; preview?: FileChange | null } | null>(null);
+/** checkpoint id -> number of files the agent changed while answering that message */
+export const touched = signal<Record<string, number>>({});
+/** the restore dialog: which user message (index) to go back to */
+export const restoreReq = signal<{ index: number; edit?: boolean } | null>(null);
+/** text placed in the composer (e.g. when editing an earlier message) */
+export const draft = signal("");
 export const runError = signal("");
 /** a tool call the model is currently generating (can take minutes for big files) */
 export const toolProgress = signal<{ name: string; chars: number; since: number } | null>(null);
@@ -143,9 +150,97 @@ export async function openChat(id: string) {
   try {
     chat.value = await api.chatLoad(id);
     runError.value = "";
+    void refreshTouched();
   } catch (e) {
     toast(errText(e), "error");
   }
+}
+
+function checkpointIds(from = 0): string[] {
+  return chat.value.messages
+    .slice(from)
+    .filter((m) => m.role === "user" && m.ui?.checkpoint_id)
+    .map((m) => m.ui!.checkpoint_id!);
+}
+
+export async function refreshTouched() {
+  const ids = checkpointIds();
+  if (ids.length === 0) {
+    touched.value = {};
+    return;
+  }
+  try {
+    touched.value = await api.checkpointTouched(chat.value.id, ids);
+  } catch {
+    touched.value = {};
+  }
+}
+
+/** Files the agent changed from user message `index` onward, and what restoring them would do. */
+export async function restorePlan(index: number) {
+  const ids = checkpointIds(index);
+  return ids.length ? api.checkpointPlan(chat.value.id, ids) : [];
+}
+
+/**
+ * Go back to just before user message `index`: put files back (optional), and/or drop that
+ * message and everything after it from the conversation (kept as a branch, not deleted).
+ */
+export async function restoreTo(index: number, opts: { files: boolean; conversation: boolean; force: boolean }) {
+  if (busy.value) return;
+  const c = chat.value;
+  const target = c.messages[index];
+  if (!target || target.role !== "user") return;
+  const ids = checkpointIds(index);
+  let undoId = "";
+  if (opts.files && ids.length) {
+    try {
+      const r = await api.checkpointRestore(c.id, ids, opts.force);
+      undoId = r.undo_id;
+    } catch (e) {
+      toast(`Restore failed: ${errText(e)}`, "error");
+      return;
+    }
+  }
+  const prevMessages = c.messages;
+  if (opts.conversation) {
+    const tail = c.messages.slice(index);
+    chat.value = {
+      ...c,
+      messages: c.messages.slice(0, index),
+      branches: [...(c.branches ?? []), { at: index, created: Date.now(), messages: tail }],
+      updated: Date.now(),
+    };
+    draft.value = stripAttachments(target.content ?? "");
+    runError.value = "";
+    await persist();
+  }
+  await refreshTouched();
+  const what = opts.files && opts.conversation ? "Files and conversation restored" : opts.files ? "Files restored" : "Conversation restored";
+  toast(what, "success", {
+    label: "Undo",
+    run: async () => {
+      try {
+        if (undoId) await api.checkpointUndo(c.id, undoId);
+        if (opts.conversation) {
+          const branches = (chat.value.branches ?? []).slice(0, -1);
+          chat.value = { ...chat.value, messages: prevMessages, branches, updated: Date.now() };
+          draft.value = "";
+          await persist();
+        }
+        await refreshTouched();
+        toast("Restore undone", "info");
+      } catch (e) {
+        toast(`Undo failed: ${errText(e)}`, "error");
+      }
+    },
+  });
+}
+
+/** attached files are inlined before the user's text; keep only what they typed */
+export function stripAttachments(s: string): string {
+  const i = s.lastIndexOf("\n```\n\n");
+  return s.startsWith("File: ") && i >= 0 ? s.slice(i + 6) : s;
 }
 
 export function startNewChat() {
@@ -153,6 +248,7 @@ export function startNewChat() {
   chat.value = newChat();
   attachments.value = [];
   runError.value = "";
+  touched.value = {};
 }
 
 export async function removeChat(id: string) {
@@ -200,7 +296,8 @@ export async function send(text: string) {
     if (parts.length) body = parts.join("\n\n") + "\n\n" + body;
   }
   const first = chat.value.messages.length === 0;
-  pushMsg({ role: "user", content: body, ui: atts.length ? { attachments: atts } : undefined });
+  const checkpoint_id = uid();
+  pushMsg({ role: "user", content: body, ui: { checkpoint_id, ...(atts.length ? { attachments: atts } : {}) } });
   if (first) chat.value = { ...chat.value, title: text.trim().slice(0, 48) };
   attachments.value = [];
   await persist();
@@ -222,6 +319,7 @@ export async function send(text: string) {
       max_turns: s.max_turns,
       auto_approve: s.auto_approve,
       use_tools: useTools.value,
+      checkpoint_id,
     });
   } catch (e) {
     runError.value = errText(e);
@@ -311,8 +409,18 @@ function onAgent(e: AgentEvent) {
       runningTool.value = { call_id: e.call_id, name: e.name, since: Date.now() };
       break;
     case "permission":
-      pending.value = { call_id: e.call_id, name: e.name, args: e.args };
+      pending.value = { call_id: e.call_id, name: e.name, args: e.args, preview: e.preview };
       break;
+    case "pruned": {
+      const ids = new Set(e.call_ids);
+      chat.value = {
+        ...chat.value,
+        messages: chat.value.messages.map((m) =>
+          m.role === "tool" && m.tool_call_id && ids.has(m.tool_call_id) ? { ...m, ui: { ...(m.ui ?? {}), elided: true } } : m,
+        ),
+      };
+      break;
+    }
     case "tool_result":
       if (pending.value?.call_id === e.call_id) pending.value = null;
       break;
@@ -336,7 +444,7 @@ function finish() {
   pending.value = null;
   usageForTurn = null;
   live.value = { content: "", reasoning: "" };
-  void persist();
+  void persist().then(refreshTouched);
 }
 
 export async function initState() {

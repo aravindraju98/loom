@@ -95,7 +95,28 @@ export interface Msg {
     prompt_tokens?: number;
     cache_n?: number;
     prompt_ms?: number;
+    /** user messages: restore point for file changes made while answering it */
+    checkpoint_id?: string;
+    /** tool messages: the file change this tool made */
+    change?: FileChange;
+    /** tool messages: output replaced by a stub in prompts to save context */
+    elided?: boolean;
   };
+}
+
+export interface FileChange {
+  path: string;
+  kind: "edit" | "create" | "overwrite" | "append" | "move" | "delete";
+  added?: number;
+  removed?: number;
+  diff?: string;
+}
+
+export interface Branch {
+  /** index of the first message that was replaced */
+  at: number;
+  created: number;
+  messages: Msg[];
 }
 
 export interface Chat {
@@ -103,6 +124,16 @@ export interface Chat {
   title: string;
   updated: number;
   messages: Msg[];
+  /** conversation tails replaced by restoring or editing an earlier message */
+  branches?: Branch[];
+}
+
+export interface PlanItem {
+  path: string;
+  action: "restore" | "delete" | "recreate" | "none" | "skip";
+  conflict: boolean;
+  added: number;
+  removed: number;
 }
 
 export interface ChatSummary {
@@ -148,6 +179,7 @@ export interface RunArgs {
   auto_approve: boolean;
   use_tools: boolean;
   extra?: Record<string, unknown>;
+  checkpoint_id?: string;
 }
 
 export type AgentEvent = { run_id: string } & (
@@ -155,8 +187,9 @@ export type AgentEvent = { run_id: string } & (
   | { type: "message"; message: Msg }
   | { type: "tool_progress"; name: string; chars: number }
   | { type: "tool_start"; call_id: string; name: string; args: unknown }
-  | { type: "permission"; call_id: string; name: string; args: unknown }
-  | { type: "tool_result"; call_id: string; ok: boolean; output: string; ms?: number }
+  | { type: "permission"; call_id: string; name: string; args: unknown; preview?: FileChange | null }
+  | { type: "tool_result"; call_id: string; ok: boolean; output: string; ms?: number; change?: FileChange | null }
+  | { type: "pruned"; call_ids: string[] }
   | {
       type: "usage";
       tokens: number;
@@ -209,6 +242,12 @@ export const api = {
   agentCancel: (runId: string) => invoke<void>("agent_cancel", { runId }),
   permissionReply: (callId: string, chatId: string, tool: string, allow: boolean, always: boolean) =>
     invoke<void>("permission_reply", { callId, chatId, tool, allow, always }),
+  checkpointPlan: (chatId: string, ids: string[]) => invoke<PlanItem[]>("checkpoint_plan", { chatId, ids }),
+  checkpointRestore: (chatId: string, ids: string[], force: boolean) =>
+    invoke<{ undo_id: string; restored: string[] }>("checkpoint_restore", { chatId, ids, force }),
+  checkpointUndo: (chatId: string, undoId: string) => invoke<string[]>("checkpoint_undo", { chatId, undoId }),
+  checkpointDiff: (chatId: string, ids: string[], path: string) => invoke<string>("checkpoint_diff", { chatId, ids, path }),
+  checkpointTouched: (chatId: string, ids: string[]) => invoke<Record<string, number>>("checkpoint_touched", { chatId, ids }),
   mcpStatus: () => invoke<McpServer[]>("mcp_status"),
   mcpGetConfig: () => invoke<string>("mcp_get_config"),
   mcpSaveConfig: (text: string) => invoke<void>("mcp_save_config", { text }),
