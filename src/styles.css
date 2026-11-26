@@ -112,6 +112,8 @@ body {
 }
 button, input, select, textarea { font: inherit; color: inherit; }
 code, pre, kbd { font-family: var(--mono); font-size: 12.5px; }
+/* show code exactly as written: no `/=` → `≠` style ligatures */
+code, pre, kbd, .diff, .log-list, textarea.code-edit { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
 ::selection { background: var(--accent-soft); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
@@ -562,9 +564,10 @@ button.send { border-radius: var(--r-sm); padding: 4px 12px; }
 .tabs button { position: relative; }
 .tab-badge { position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--bad); }
 .logs-panel { display: flex; flex-direction: column; gap: 10px; padding-bottom: 10px; }
-.segmented { display: flex; padding: 2px; gap: 2px; background: var(--surface-3); border-radius: var(--r-sm); flex: none; }
+.segmented { display: flex; padding: 2px; gap: 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); flex: none; }
 .segmented button { flex: 1; min-height: 26px; border: 0; background: transparent; color: var(--text-2); font-size: var(--fs-sm); }
-.segmented button.on { background: var(--surface-2); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); }
+.segmented button.on { background: var(--accent-soft); color: var(--accent); }
+.segmented button:hover:not(:disabled):not(.on) { background: transparent; color: var(--text); }
 .logs, .runs, .inspector { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
 .log-toolbar { display: flex; align-items: center; gap: 4px; flex: none; }
 .log-toolbar .icon-btn { width: 28px; height: 28px; min-height: 28px; }

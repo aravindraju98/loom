@@ -28,5 +28,14 @@ document.addEventListener("click", (ev) => {
   }
 });
 
-render(<App />, document.getElementById("app")!);
-void initState();
+async function boot() {
+  // `npm run dev` in a normal browser: no Tauri backend, so use a mock one with sample data
+  if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
+    const { installMock } = await import("./dev/mock");
+    installMock();
+  }
+  render(<App />, document.getElementById("app")!);
+  await initState();
+}
+
+void boot();

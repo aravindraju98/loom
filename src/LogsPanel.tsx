@@ -222,7 +222,6 @@ function RunInspector({ id }: { id: string }) {
             const start = `${Math.max(((e.t - secs * 1000) / total) * 100, 0)}%`;
             return (
               <li key={i} class="tl-item tl-turn">
-                <div class="tl-bar"><i style={{ left: start, width }} /></div>
                 <div class="tl-line">
                   <b>Turn {turn}</b>
                   <span class="tl-meta">
@@ -234,6 +233,7 @@ function RunInspector({ id }: { id: string }) {
                     {e.finish === "length" ? " · cut off" : ""}
                   </span>
                 </div>
+                <div class="tl-bar"><i style={{ left: start, width }} /></div>
               </li>
             );
           }
@@ -244,7 +244,6 @@ function RunInspector({ id }: { id: string }) {
             const ch = e.change as { path?: string; added?: number; removed?: number } | null;
             return (
               <li key={i} class={`tl-item tl-tool ${e.ok === false ? "bad" : ""}`}>
-                <div class="tl-bar"><i style={{ left: start, width }} /></div>
                 <div class="tl-line">
                   <code>{String(e.name)}</code>
                   <span class="tl-meta">
@@ -253,6 +252,7 @@ function RunInspector({ id }: { id: string }) {
                     {e.ok === false ? " · failed" : ""}
                   </span>
                 </div>
+                <div class="tl-bar"><i style={{ left: start, width }} /></div>
                 {e.error != null && <div class="tl-err">{String(e.error)}</div>}
               </li>
             );

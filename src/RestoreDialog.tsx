@@ -2,7 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import type { PlanItem } from "./api";
 import { DiffStat } from "./ui/Diff";
 import { Modal } from "./ui/Modal";
-import { chat, errText, restorePlan, restoreReq, restoreTo, settings } from "./state";
+import { chat, errText, restorePlan, restoreReq, restoreTo, settings, stripAttachments } from "./state";
 
 const ACTION: Record<PlanItem["action"], string> = {
   restore: "restore",
@@ -42,7 +42,10 @@ export function RestoreDialog() {
   const changes = (plan ?? []).filter((p) => p.action !== "none");
   const conflicts = changes.filter((p) => p.conflict);
   const hasFiles = changes.some((p) => p.action !== "skip");
-  const later = chat.value.messages.length - req.index;
+  // what the user sees as messages: their prompts and the assistant's replies, not tool results
+  const later = chat.value.messages.slice(req.index).filter((m) => m.role !== "tool" && (m.role === "user" || m.content)).length;
+  const text = stripAttachments(msg?.content ?? "").replace(/\s+/g, " ").trim();
+  const quote = text.length > 80 ? `${text.slice(0, 78).trimEnd()}…` : text;
 
   const go = async (files: boolean, conversation: boolean) => {
     setWorking(true);
@@ -74,7 +77,7 @@ export function RestoreDialog() {
       }
     >
       <p class="dlg-lead">
-        Go back to before <q class="quote">{(msg?.content ?? "").slice(0, 80)}</q>.{" "}
+        Go back to before <q class="quote">{quote}</q>.{" "}
         {later > 0 && <>The {later} message{later === 1 ? "" : "s"} from there on will be moved to history (not deleted){req.edit ? " and the message put back in the composer" : ""}.</>}
       </p>
       {err && <div class="error">{err}</div>}
