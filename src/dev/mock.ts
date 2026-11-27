@@ -158,6 +158,55 @@ function evalBatch(model: string, started: number, pass: boolean[]) {
   return { id: `b${started}`, started, ms: 60000, model, engine: "llama", ctx: 16384, passed: pass.filter(Boolean).length, total: pass.length, cancelled: false, results };
 }
 
+const FORMAT_BEFORE = [
+  "export function formatBytes(n: number): string {",
+  "  if (n < 1024) return `${n} B`;",
+  '  const units = ["KB", "MB", "GB", "TB"];',
+  "  let i = -1;",
+  "  do { n /= 1024; i++; } while (n >= 1024);",
+  '  return n.toFixed(1) + " " + units[i];',
+  "}",
+  "",
+  "export function formatDuration(ms: number): string {",
+  "  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;",
+  "}",
+  "",
+].join("\n");
+
+const FORMAT_AFTER = FORMAT_BEFORE.replace(
+  ["  let i = -1;", "  do { n /= 1024; i++; } while (n >= 1024);", '  return n.toFixed(1) + " " + units[i];'].join("\n"),
+  ["  let i = 0;", "  let v = n / 1024;", "  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }", "  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;"].join("\n"),
+);
+
+/** a small fake workspace: relative path -> content */
+const TREE: Record<string, string> = {
+  "src\\utils\\format.ts": FORMAT_AFTER,
+  "src\\utils\\format.test.ts": 'import { formatBytes } from "./format";\n\ntest("formats bytes", () => {\n  expect(formatBytes(1048576)).toBe("1.0 MB");\n});\n',
+  "src\\main.tsx": 'import { render } from "preact";\nimport { App } from "./App";\n\nrender(<App />, document.getElementById("app")!);\n',
+  "src\\App.tsx": "export function App() {\n  return <h1>demo</h1>;\n}\n",
+  "src\\styles.css": "body {\n  margin: 0;\n  font: 14px system-ui;\n}\n",
+  "Cargo.toml": '[package]\nname = "demo"\nversion = "0.1.0"\n',
+  "package.json": '{\n  "name": "demo-app",\n  "version": "1.0.0",\n  "scripts": { "test": "vitest" }\n}\n',
+  "README.md": "# demo-app\n\nA small demo.\n",
+  ".gitignore": "dist\nnode_modules\n",
+  "dist\\index.js": "console.log(1);\n",
+};
+const FILES: Record<string, string> = Object.fromEntries(Object.entries(TREE).map(([r, t]) => [`${WS}\\${r}`.toLowerCase(), t]));
+
+function listDir(dir: string) {
+  const rel = dir.length > WS.length ? dir.slice(WS.length + 1) : "";
+  const prefix = rel ? `${rel}\\` : "";
+  const seen = new Map<string, boolean>();
+  for (const r of Object.keys(TREE)) {
+    if (!r.startsWith(prefix)) continue;
+    const rest = r.slice(prefix.length).split("\\");
+    seen.set(rest[0], rest.length > 1 || seen.get(rest[0]) === true);
+  }
+  return [...seen.entries()]
+    .map(([name, isDir]) => ({ name, path: `${dir}\\${name}`, is_dir: isDir, size: isDir ? 0 : (TREE[prefix + name]?.length ?? 0), ignored: name === "dist" }))
+    .sort((x, y) => Number(y.is_dir) - Number(x.is_dir) || x.name.localeCompare(y.name));
+}
+
 export function installMock() {
   mockWindows("main");
   mockIPC(
@@ -192,12 +241,16 @@ export function installMock() {
           { id: "lmstudio-community/Mistral-Small-4-24B-Instruct-GGUF", downloads: 210_000, likes: 188, pipeline: "text-generation", updated: new Date(now - 40 * 8.64e7).toISOString() },
         ];
         case "eval_results": return [evalBatch("qwen2.5-coder-7b-instruct-q4_k_m", now - 3.6e6, [true, true, false, true, true, true]), evalBatch("gemma-3-12b-it-Q5_K_M", now - 8.64e7, [true, false, false, true, true, true])];
-        case "fs_list": return [
-          { name: "src", path: `${WS}\\src`, is_dir: true, size: 0 },
-          { name: "tests", path: `${WS}\\tests`, is_dir: true, size: 0 },
-          { name: "package.json", path: `${WS}\\package.json`, is_dir: false, size: 1200 },
-          { name: "README.md", path: `${WS}\\README.md`, is_dir: false, size: 3400 },
-        ];
+        case "fs_list": return listDir(String(a.path));
+        case "fs_open": {
+          const p = String(a.path);
+          const t = FILES[p.toLowerCase()];
+          if (t === undefined) throw "file not found";
+          return { path: p, text: t, version: `v${t.length}`, size: t.length, crlf: false, bom: false, encoding: "utf8", readonly: false };
+        }
+        case "fs_save": FILES[String(a.path).toLowerCase()] = String(a.text); return { version: `v${String(a.text).length}` };
+        case "fs_watch": case "fs_create": case "fs_rename": case "fs_delete": case "fs_reveal": return null;
+        case "checkpoint_file_base": return FORMAT_BEFORE;
         case "fs_read": return { text: "# demo-app\n\nA small demo.", truncated: false, binary: false, size: 30 };
         default: return null;
       }

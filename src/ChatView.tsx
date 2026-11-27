@@ -54,6 +54,7 @@ function ContextMeter() {
   );
 }
 import { Diff, DiffStat } from "./ui/Diff";
+import { reviewAgentChange } from "./workbench/state";
 
 function fmtMs(ms: number): string {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
@@ -163,7 +164,21 @@ function ToolCard({ name, args, result, callId }: { name: string; args: string; 
     <details class={`tool ${cls}`} open={waiting}>
       <summary>
         <span class="tool-name">{name}</span>
-        {target && <span class="tool-target ellipsis" title={target}>{target}</span>}
+        {target && change && change.kind !== "delete" ? (
+          <button
+            class="tool-target ellipsis link"
+            title={`Open ${target} in the editor`}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              void reviewAgentChange(change.kind === "move" ? change.path.split(" → ").pop()! : change.path);
+            }}
+          >
+            {target}
+          </button>
+        ) : (
+          target && <span class="tool-target ellipsis" title={target}>{target}</span>
+        )}
         {change && <DiffStat added={change.added} removed={change.removed} />}
         <span class="tool-status">{status}</span>
       </summary>

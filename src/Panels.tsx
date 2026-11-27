@@ -1,9 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api, fmtBytes } from "./api";
-import type { FsEntry, Preview } from "./api";
 import {
-  attachments, engine, loadError, loadModel, mcp, models, modelsLoading, refreshMcp, refreshModels, saveSettings, scanError,
+  engine, loadError, loadModel, mcp, models, modelsLoading, refreshMcp, refreshModels, saveSettings, scanError,
   settings, unloadModel,
 } from "./state";
 
@@ -81,108 +79,6 @@ export function ModelsPanel() {
         <summary>Remote endpoints</summary>
         <RemoteEndpoints />
       </details>
-    </div>
-  );
-}
-
-/* ---------------- Files ---------------- */
-
-function Node({ e, depth, onPick }: { e: FsEntry; depth: number; onPick: (e: FsEntry) => void }) {
-  const [open, setOpen] = useState(false);
-  const [kids, setKids] = useState<FsEntry[] | null>(null);
-  const [err, setErr] = useState("");
-  const toggle = async () => {
-    if (!e.is_dir) return onPick(e);
-    if (!open && kids === null) {
-      try {
-        setKids(await api.fsList(e.path));
-      } catch (x) {
-        setErr(String(x));
-        setKids([]);
-      }
-    }
-    setOpen(!open);
-  };
-  return (
-    <div role="none">
-      <div
-        class="node"
-        role="treeitem"
-        tabIndex={0}
-        aria-expanded={e.is_dir ? open : undefined}
-        aria-level={depth + 1}
-        style={{ paddingLeft: 8 + depth * 14 }}
-        onClick={() => void toggle()}
-        onKeyDown={(ev) => {
-          if (ev.key === "Enter" || ev.key === " ") {
-            ev.preventDefault();
-            void toggle();
-          } else if (ev.key === "ArrowRight" && e.is_dir && !open) {
-            ev.preventDefault();
-            void toggle();
-          } else if (ev.key === "ArrowLeft" && e.is_dir && open) {
-            ev.preventDefault();
-            setOpen(false);
-          }
-        }}
-        title={e.path}
-      >
-        <span class="caret" aria-hidden="true">{e.is_dir && (
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform 160ms" }}><path d="m9 6 6 6-6 6" /></svg>
-        )}</span>
-        <span class={e.is_dir ? "dir" : "file"}>{e.name}</span>
-      </div>
-      {err && <div class="error small" style={{ marginLeft: 20 }}>{err}</div>}
-      {open && kids?.length === 0 && !err && <div class="hint small" style={{ paddingLeft: 30 + depth * 14 }}>(empty)</div>}
-      {open && kids && kids.length > 0 && <div role="group">{kids.map((k) => <Node key={k.path} e={k} depth={depth + 1} onPick={onPick} />)}</div>}
-    </div>
-  );
-}
-
-export function FilesPanel() {
-  const ws = settings.value?.workspace ?? "";
-  const [root, setRoot] = useState<FsEntry[]>([]);
-  const [err, setErr] = useState("");
-  const [sel, setSel] = useState<{ e: FsEntry; p: Preview } | null>(null);
-
-  useEffect(() => {
-    setSel(null);
-    if (!ws) return setRoot([]);
-    api.fsList(ws).then((r) => { setRoot(r); setErr(""); }).catch((e) => setErr(String(e)));
-  }, [ws]);
-
-  const choose = async () => {
-    const dir = await open({ directory: true, multiple: false, defaultPath: ws || undefined });
-    if (typeof dir === "string") await saveSettings({ workspace: dir });
-  };
-  const pick = async (e: FsEntry) => {
-    try {
-      setSel({ e, p: await api.fsRead(e.path) });
-    } catch (x) {
-      setErr(String(x));
-    }
-  };
-
-  return (
-    <div class="panel-body files">
-      <div class="row">
-        <button onClick={() => void choose()}>{ws ? "Change folder" : "Choose workspace folder"}</button>
-        {ws && <button onClick={() => void api.fsReveal(ws)}>Open</button>}
-      </div>
-      <div class="hint ws">{ws || "The agent can only touch files inside the workspace folder."}</div>
-      {err && <div class="error">{err}</div>}
-      {ws && root.length === 0 && !err && <div class="hint">This folder is empty.</div>}
-      <div class="tree" role="tree" aria-label="Workspace files">{root.map((e) => <Node key={e.path} e={e} depth={0} onPick={pick} />)}</div>
-      {sel && (
-        <div class="preview">
-          <div class="row">
-            <b class="grow">{sel.e.name}</b>
-            <button onClick={() => { if (!attachments.value.includes(sel.e.path)) attachments.value = [...attachments.value, sel.e.path]; }}>Attach to chat</button>
-            <button onClick={() => void api.fsReveal(sel.e.path)}>Reveal</button>
-          </div>
-          {sel.p.binary ? <div class="hint">Binary file · {fmtBytes(sel.p.size)}</div> : <pre class="code">{sel.p.text}{sel.p.truncated ? "\n…[truncated]" : ""}</pre>}
-        </div>
-      )}
     </div>
   );
 }
